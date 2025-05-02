@@ -7,6 +7,8 @@ import re
 import dill
 import time
 
+import ast
+
 from ipyflow.kernel import IPyflowKernel
 from IPython import get_ipython
 
@@ -30,26 +32,104 @@ class NamedObject:
         self.obj = obj_ref
         self.code = code_dep
 
+import traceback
+import builtins
+
+
+class VariableTracker(ast.NodeVisitor):
+    def __init__(self):
+        self.potential_accessed = set()
+        self.potential_changed = set()
+        self.global_vars = set()
+
+    def visit_Name(self, node):
+        self.potential_accessed.add(node.id)
+        if isinstance(node.ctx, ast.Load):
+            self.potential_accessed.add(node.id)
+        elif isinstance(node.ctx, ast.Store):
+            self.potential_accessed.add(node.id)
+        # print(node.id)
+        self.generic_visit(node)
+
+    def visit_Import(self, node):
+        # print(node.names)
+        for alias in node.names:
+            # print(alias.asname or alias.name)
+            self.potential_accessed.add(alias.asname or alias.name)
+            # self.global_vars.add(alias.asname or alias.name)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node):
+       
+        for alias in node.names:
+            # print(alias.asname or alias.name)
+            self.potential_accessed.add(alias.asname or alias.name)
+            # self.global_vars.add(alias.asname or alias.name)
+        self.generic_visit(node)
+
+
+
 class TrackedNamespace(dict):
     """Dict subclass to track variable accesses during cell execution"""
-    def __init__(self, *args, **kwargs):
+    def __init__(self, original_ns, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.original_ns = original_ns  # Reference to ip.user_ns
         self.accessed = set()
         self.changed = set()
 
     def __getitem__(self, key):
-        if key == 'print':
-            return print
-        self.accessed.add(key)
-        return super().__getitem__(key)
+        print(f"[TrackedNamespace] Accessing key: {key}")
+        print(f"[TrackedNamespace] Current keys: {list(self.keys())}")
+        if key in self:
+            self.accessed.add(key)
+            return super().__getitem__(key)
+        if key in self.original_ns:
+            print(f"[TrackedNamespace] Found '{key}' in original namespace")
+            self.accessed.add(key)
+            return self.original_ns[key]
+        if hasattr(builtins, key):
+            print(f"[TrackedNamespace] Found '{key}' in builtins")
+            self.accessed.add(key)
+            return getattr(builtins, key)
+        print(f"[TrackedNamespace] Key '{key}' not found")
+        traceback.print_stack()
+        raise KeyError(f"Variable '{key}' not defined")
 
     def __setitem__(self, key, value):
         self.accessed.add(key)
+        self.changed.add(key)
         super().__setitem__(key, value)
+        self.original_ns[key] = value  # Sync with original namespace
+
+    def update(self, *args, **kwargs):
+        super().update(*args, **kwargs)
+        self.original_ns.update(*args, **kwargs)  # Keep original_ns in sync
+
+    def __getitem__(self, key):
+        
+        # print(f"[TrackedNamespace] Accessing key: {key}")
+        # print(f"[TrackedNamespace] Current keys: {list(self.keys())}")
+        # if key not in self:
+        #     print(f"[TrackedNamespace] Key '{key}' not found")
+        #     print("Stack trace:")
+        #     traceback.print_stack()
+        #     raise KeyError(f"Variable '{key}' not defined")
+        # self.accessed.add(key)
+        return super().__getitem__(key)
+        
+        # if key == 'print':
+    #         return print
+    #     self.accessed.add(key)
+    #     return super().__getitem__(key)
+
+    # def __setitem__(self, key, value):
+    #     self.accessed.add(key)
+    #     super().__setitem__(key, value)
 
     # def __delitem__(self, key):
     #     # self.deleted.add(key)
     #     super().__delitem__(key)
+
 
 def patch_namespace(ip):
     """Main patching function to install hooks"""
@@ -98,9 +178,22 @@ class CustomKernel(IPyflowKernel):
         # Activate the patching when imported
         # self.initalized = False
         super().__init__(**kwargs)
+        # self.configure_ipyflow_tracer()
         # patch_namespace(self.shell)
         
         # myshell = IPyflowInteractiveShell.
+
+    # def configure_ipyflow_tracer(self):
+    #     """Patch ipyflow's tracer to use TrackedNamespace"""
+    #     from ipyflow.tracing.ipyflow_tracer import IPyflowTracer
+    #     original_trace = IPyflowTracer.trace
+
+    #     def patched_trace(self, frame, event, arg):
+    #         if hasattr(self.shell, 'tracked_ns'):
+    #             frame.f_globals = self.shell.tracked_ns
+    #         return original_trace(self, frame, event, arg)
+
+    #     IPyflowTracer.trace = patched_trace
 
     def dump_namespace(self, ):
         to_dump = {}
@@ -118,24 +211,68 @@ class CustomKernel(IPyflowKernel):
             # dill.dump_module(dill_file, self.shell)
             dill.dump(to_dump, dill_file)
 
-    def pre_run_cell(self, ip):
-        """Hook executed before each cell runs"""
-        ip.tracked_ns = TrackedNamespace(ip.user_ns)
-        ip.user_ns = ip.tracked_ns  # Replace with tracked namespace
+    # def pre_run_cell(self, ip):
+    #     """Hook executed before each cell runs"""
+        
+    #     ip.tracked_ns = TrackedNamespace(ip.user_ns)
+    #     ip.user_ns = ip.tracked_ns  # Replace with tracked namespace
+        
+    # def post_run_cell(self, ip):
+    #     """Hook executed after each cell completes"""
+    #     if hasattr(ip, 'tracked_ns'):
+    #         # Get accessed variables and process them
+    #         accessed_vars = ip.tracked_ns.accessed
+    #         # print(f"[Kishu] Accessed variables: {accessed_vars}")
+
+    #         # changed = ip.tracked_ns.changed
+    #         # print(f"[Kishu] Changed variables: {changed}")
+            
+    #         # Restore original namespace (convert back to dict)
+    #         ip.user_ns = dict(ip.tracked_ns)
+    #         del ip.tracked_ns
+
+    def pre_run_cell(self, ip, code):
+        ip.variable_tracker = VariableTracker()
+        # Snapshot initial globals
+        # ip.variable_tracker.before_globals = {
+        #     k: id(ip.user_ns[k]) for k in ip.user_ns if not k.startswith('_')
+        # }
+        # Analyze code statically
+        try:
+            tree = ast.parse(code)
+            ip.variable_tracker.visit(tree)
+            # print(ip.variable_tracker.÷potential_accessed)
+        except SyntaxError:
+            pass
 
     def post_run_cell(self, ip):
-        """Hook executed after each cell completes"""
-        if hasattr(ip, 'tracked_ns'):
-            # Get accessed variables and process them
-            accessed_vars = ip.tracked_ns.accessed
-            # print(f"[Kishu] Accessed variables: {accessed_vars}")
-
-            # changed = ip.tracked_ns.changed
-            # print(f"[Kishu] Changed variables: {changed}")
-            
-            # Restore original namespace (convert back to dict)
-            ip.user_ns = dict(ip.tracked_ns)
-            del ip.tracked_ns
+        # print(ip.variable_tracker.potential_accessed)
+        if hasattr(ip, 'variable_tracker'):
+            # # Get changed variables via namespace comparison
+            # # after_globals = {k for k in ip.user_ns if not k.startswith('_')}
+            # # before_globals = set(ip.variable_tracker.before_globals.keys())
+            # # changed = after_globals - before_globals 
+            # # # Include variables modified in global scope or declared global
+            # # changed.update(
+            # #     v for v in ip.variable_tracker.potential_changed
+            # #     if v in ip.user_ns and (v in ip.variable_tracker.global_vars or v in ip.user_ns)
+            # # )
+            # # # Get accessed variables from ipyflow's aliases and AST
+            # # accessed = set()
+            # # for mem in flow().aliases:
+            # #     for var in flow().aliases[mem]:
+            # #         if var.readable_name in ip.user_ns or hasattr(builtins, var.readable_name):
+            # #             accessed.add(var.readable_name)
+            # # accessed.update(
+            # #     v for v in ip.variable_tracker.potential_accessed
+            # #     if v in ip.user_ns or hasattr(builtins, v)
+            # # )
+            # globals_accessed = {k for k in ip.variable_tracker.potential_accessed if k in ip.user_ns}
+            # print(f"[Kishu] Accessed variables: {globals_accessed}")
+            # # print(f"[Kishu] Changed variables: {changed}")
+            # # ip.variable_tracker.accessed = accessed
+            # # ip.variable_tracker.changed = changed
+            del ip.variable_tracker
 
     def getSym(self, id, name):
 
@@ -184,6 +321,7 @@ class CustomKernel(IPyflowKernel):
         return result
 
     def dump(self, ip):
+        globals_accessed = {k for k in ip.variable_tracker.potential_accessed if k in ip.user_ns}
         exclusion_list = ["print", "display", "fake_edge_sym", "ipyflow", "flow", "aliases", "_"]
         to_persist = {}
         # print(ip.tracked_ns.accessed)
@@ -193,6 +331,7 @@ class CustomKernel(IPyflowKernel):
             should_persist = False
             for entry in entrySet:
                 
+                var = None
                 if entry.readable_name.startswith("<literal_sym_"):
                     continue
                 if "__ipyflow_mutation" in entry.readable_name:
@@ -208,11 +347,15 @@ class CustomKernel(IPyflowKernel):
                 if var in exclusion_list:
                     continue
                
-                varSet.append(var)
-                if var in ip.tracked_ns.accessed: 
+                # print(entry.full_path)
+                if var:
+                    varSet.append(var)
+                if var in globals_accessed: 
                     should_persist = True
 
+                
             
+            # print(varSet, entrySet)
             for var in varSet:
                 if should_persist:
                     obj = None
@@ -230,7 +373,7 @@ class CustomKernel(IPyflowKernel):
         #         print(code( self.getSym(id(self.shell.user_ns[var]), var) ))
                     
                 
-        print("Persisted Variables: ", to_persist)
+        print("Persisted Variables: ", to_persist.keys())
         with open(f'{os.getcwd()}/session/checkpoint_{self.shell.execution_count - 1}.pkl', 'wb') as dill_file: 
             # dill.dump_module(dill_file, self.shell)
             # print(to_persist)
@@ -288,7 +431,8 @@ class CustomKernel(IPyflowKernel):
                         ,cell_meta=None, cell_id=None,):
 
         ip = self.shell
-        self.pre_run_cell(ip)
+        # print(type(ip), type(ip.user_ns))
+        self.pre_run_cell(ip, code)
 
         # # start_time = time.time()
 

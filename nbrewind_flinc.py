@@ -917,16 +917,16 @@ class CustomKernel(IPyflowKernel):
             # enable_autosave_from_kernel()
             # Load notebook
             nb = None
-            # with open(notebook, 'r', encoding='utf-8') as f:
-            #     nb = nbformat.read(f, as_version=4)
-            #     # set to audit mode
-            #     if nb.metadata['AUDIT'] == "true":
-            #         self.audit = True
+            with open(notebook, 'r', encoding='utf-8') as f:
+                nb = nbformat.read(f, as_version=4)
+                # set to audit mode
+                if nb.metadata['AUDIT'] == "true":
+                    self.audit = True
 
-            # if self.audit:
-            #     with open(notebook, 'w', encoding='utf-8') as f:
-            #         nb.metadata['AUDIT'] = "false"
-            #         nbformat.write(nb, f)                    
+            if self.audit:
+                with open(notebook, 'w', encoding='utf-8') as f:
+                    nb.metadata['AUDIT'] = "false"
+                    nbformat.write(nb, f)                    
           
             self.nb_initialized = True
 
@@ -935,97 +935,97 @@ class CustomKernel(IPyflowKernel):
 
         # # start_time = time.time()
 
-        # checkpoint_pattern = r"^# commit"
-        restore_pattern = r"^# rollback \[(\d+)\].*"
+        # # checkpoint_pattern = r"^# commit"
+        # restore_pattern = r"^# rollback \[(\d+)\].*"
 
-        restore_match = re.match(restore_pattern, code.splitlines()[0])
-        # # checkpoint_match = re.match(checkpoint_pattern, code.splitlines()[0])
+        # restore_match = re.match(restore_pattern, code.splitlines()[0])
+        # # # checkpoint_match = re.match(checkpoint_pattern, code.splitlines()[0])
         
-        if restore_match:
-            exec_id = re.findall(r'\b\d+\b', code.splitlines()[0])[0]
+        # if restore_match:
+        #     exec_id = re.findall(r'\b\d+\b', code.splitlines()[0])[0]
             
-            loaded_vars = {}
-            for f in range(int(exec_id ) + 1):
-                self.run_checkout_command(f'{os.getcwd()}/session/vv', f, f'{os.getcwd()}/session/checkpoint_{f}.pkl')
-                fname = f'{os.getcwd()}/session/checkpoint_{f}.pkl'
-                if os.path.isfile(fname):
-                    with open(fname, 'rb') as dill_file:
-                        loaded_vars.update(dill.load(dill_file))
-                    # os.remove(fname)
+        #     loaded_vars = {}
+        #     for f in range(int(exec_id ) + 1):
+        #         self.run_checkout_command(f'{os.getcwd()}/session/vv', f, f'{os.getcwd()}/session/checkpoint_{f}.pkl')
+        #         fname = f'{os.getcwd()}/session/checkpoint_{f}.pkl'
+        #         if os.path.isfile(fname):
+        #             with open(fname, 'rb') as dill_file:
+        #                 loaded_vars.update(dill.load(dill_file))
+        #             # os.remove(fname)
         
             
             
-            # update global namespace with loaded variables
-            for var in loaded_vars:
-                # loaded_vars[var] = loaded_vars[var]['obj']
-                self.shell.user_ns.update({var: loaded_vars[var]['obj']})
+        #     # update global namespace with loaded variables
+        #     for var in loaded_vars:
+        #         # loaded_vars[var] = loaded_vars[var]['obj']
+        #         self.shell.user_ns.update({var: loaded_vars[var]['obj']})
 
-            # Build dependency graph
-            deps_graph = {var: data['deps'] for var, data in loaded_vars.items() if data['obj'] is None}
+        #     # Build dependency graph
+        #     deps_graph = {var: data['deps'] for var, data in loaded_vars.items() if data['obj'] is None}
 
-            # Get execution order using topological sort
-            execution_order = self.topological_sort(deps_graph)
-            # print(loaded_vars)
+        #     # Get execution order using topological sort
+        #     execution_order = self.topological_sort(deps_graph)
+        #     # print(loaded_vars)
 
-            namespace = self.shell.user_ns
+        #     namespace = self.shell.user_ns
 
-            # self.shell.user_ns['A'] = None
+        #     # self.shell.user_ns['A'] = None
 
-            # print(namespace['A'])
-            # Execute code for each variable in order, only if missing
-            for var_name in execution_order:
-                # Check if the variable exists and is not None in the namespace
-                # print(namespace['A'])
-                if var_name in namespace and namespace[var_name] is not None:
-                    continue  # Skip if the object already exists and is not None
+        #     # print(namespace['A'])
+        #     # Execute code for each variable in order, only if missing
+        #     for var_name in execution_order:
+        #         # Check if the variable exists and is not None in the namespace
+        #         # print(namespace['A'])
+        #         if var_name in namespace and namespace[var_name] is not None:
+        #             continue  # Skip if the object already exists and is not None
                 
-                # print(loaded_vars[var_name])
-                code = str(loaded_vars[var_name]['code'])
-                # print(type(str(code)))
-                try:
-                    # Execute the code in the namespace
-                    # print("hello")
-                    exec(code, namespace)
-                    # If the variable isn't directly assigned, try to find it
-                    # if var_name not in namespace:
-                    #     for key, value in namespace.items():
-                    #         if hasattr(value, '__dict__') and var_name in value.__dict__:
-                    #             namespace[var_name] = value.__dict__[var_name]
-                    #             break
-                except Exception as e:
-                    print(f"Error restoring {var_name}: {str(e)}")
-                    continue
-                # print(f"Restored checkpoint {f}")                        
+        #         # print(loaded_vars[var_name])
+        #         code = str(loaded_vars[var_name]['code'])
+        #         # print(type(str(code)))
+        #         try:
+        #             # Execute the code in the namespace
+        #             # print("hello")
+        #             exec(code, namespace)
+        #             # If the variable isn't directly assigned, try to find it
+        #             # if var_name not in namespace:
+        #             #     for key, value in namespace.items():
+        #             #         if hasattr(value, '__dict__') and var_name in value.__dict__:
+        #             #             namespace[var_name] = value.__dict__[var_name]
+        #             #             break
+        #         except Exception as e:
+        #             print(f"Error restoring {var_name}: {str(e)}")
+        #             continue
+        #         # print(f"Restored checkpoint {f}")                        
                         
-                # else:
-                #     continue
-                #     print("No checkpoint found for the given ID")
+        #         # else:
+        #         #     continue
+        #         #     print("No checkpoint found for the given ID")
         
             
-            # ip = get_ipython()
-            # res =  await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
+        #     # ip = get_ipython()
+        #     # res =  await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
             
-            # accessed_vars = ip.tracked_ns.accessed
-        #     to_dump = {}
-        #     for v in accessed_vars:
-        #         to_dump[v] = self.shell.user_ns[v]
+        #     # accessed_vars = ip.tracked_ns.accessed
+        # #     to_dump = {}
+        # #     for v in accessed_vars:
+        # #         to_dump[v] = self.shell.user_ns[v]
 
-        #     with open(f'{os.getcwd()}/session/checkpoint_{self.shell.execution_count - 1}.pkl', 'wb') as dill_file: 
-        #         # dill.dump_module(dill_file, self.shell)
-        #         # print(to_dump)
-        #         dill.dump(to_dump, dill_file)
+        # #     with open(f'{os.getcwd()}/session/checkpoint_{self.shell.execution_count - 1}.pkl', 'wb') as dill_file: 
+        # #         # dill.dump_module(dill_file, self.shell)
+        # #         # print(to_dump)
+        # #         dill.dump(to_dump, dill_file)
             
-        #     self.post_run_cell(ip)
-        #     return res
+        # #     self.post_run_cell(ip)
+        # #     return res
 
-        # # if checkpoint_match:
-        # #     result =  await super().do_execute(code , silent, store_history, user_expressions, allow_stdin)
-        # #     self.dump_namespace()
-        #     # return result
+        # # # if checkpoint_match:
+        # # #     result =  await super().do_execute(code , silent, store_history, user_expressions, allow_stdin)
+        # # #     self.dump_namespace()
+        # #     # return result
 
-        # # if not self.initalized:
-        # #     self.initalized = True
-        # #     patch_namespace(self.shell)
+        # # # if not self.initalized:
+        # # #     self.initalized = True
+        # # #     patch_namespace(self.shell)
         
         # if self.audit:
         if code.strip().startswith('%') or code.strip().startswith('%%'):

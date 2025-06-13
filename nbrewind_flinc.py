@@ -23,7 +23,11 @@ from ipyflow import deps
 
 import subprocess
 from IPython.core.interactiveshell import InteractiveShell
+from IPython.core.magic import Magics, magics_class, line_magic
+import nbformat
 
+from contextlib import contextmanager
+from queue import SimpleQueue
 
 class NamedObject:
 
@@ -33,6 +37,8 @@ class NamedObject:
 
 import traceback
 import builtins
+
+import copy
 
 from metadata_handler import MetadataHandler
 
@@ -159,6 +165,44 @@ def patch_namespace(ip):
     ip.events.register('pre_run_cell', pre_run_cell)
     ip.events.register('post_run_cell', post_run_cell)
 
+@magics_class
+class NbRewindMagics(Magics):
+    
+    def __init__(self, kernel):
+        super().__init__()
+        self.kernel = kernel
+
+    @line_magic
+    def audit(self, line):
+        """Enable or disable audit mode"""
+        if line.strip().lower() == 'on':
+            self.kernel.audit = True
+            # print("Audit mode enabled")
+        elif line.strip().lower() == 'off':
+            self.kernel.audit = False
+        #reset the workflow
+        self.kernel.last_cid = 0
+            # print("Audit mode disabled")
+        # else:
+        #     print("Usage: %audit on|off")
+    
+    @line_magic
+    def show(self, line):
+        # show next available checkpoints based on clast ran cell
+        """Show available checkpoints"""
+
+        if line.strip().lower() == 'next checkpoints' or line.strip().lower() == 'next checkpoint':
+            notebook = self.kernel.shell.user_ns.get("__session__", None)
+            notebook_path = "/".join(notebook.split("/")[:-1])
+            metadata_handler = MetadataHandler(notebook_path)
+            res = metadata_handler.get_next_checkpoints(self.kernel.last_cid)
+            
+            for c_id, c in res.items():
+                print("##################")
+                print(f"Checkpoint ID: {c_id}")
+                print(f"{c}")
+                print("##################")
+
 
 class CustomKernel(IPyflowKernel):
     implementation = 'NB-Rewind'
@@ -183,9 +227,20 @@ class CustomKernel(IPyflowKernel):
         # self.checkpnt_times = []
         self.nb_initialized = False
         self.diverged = False
-        if not os.path.exists(f'{os.getcwd()}/session'):
-            os.mkdir(f'{os.getcwd()}/session')
+        self.audit = False
+        # get environment variable AUDIT
+        # this is set in audit-kernel.json
+        # if os.getenv("AUDIT", "false") == "true":
+        #     self.audit = True
+        #     os.unsetenv("AUDIT")
+        self.last_cid = 0
+        
+        # if not os.path.exists(f'{os.getcwd()}/session'):
+        #     os.mkdir(f'{os.getcwd()}/session')
+        
         super().__init__(**kwargs)
+        self.shell.register_magics(NbRewindMagics(self))
+        self.shell.run_line_magic("flow", "mode normal")
         # shell = InteractiveShell.instance()
         # shell.run_line_magic("flow", "mode", "normal")
         # self.configure_ipyflow_tracer()
@@ -384,7 +439,7 @@ class CustomKernel(IPyflowKernel):
                     
                 
         # print("Persisted Variables: ", to_persist.keys())
-        with open(f'{os.getcwd()}/session/checkpoint_{self.shell.execution_count - 1}.pkl', 'wb') as dill_file: 
+        with open(f'{os.getcwd()}/checkpoint_{self.last_cid}.pkl', 'wb') as dill_file: 
             # dill.dump_module(dill_file, self.shell)
             # print(to_persist)
             dill.dump(to_persist, dill_file)
@@ -401,6 +456,9 @@ class CustomKernel(IPyflowKernel):
             # raise FileNotFoundError(f"The file {path_to_file} does not exist.")
             return
         
+        # remove json file if it already exists
+        if os.path.exists(f"{os.getcwd()}/{exec_id}.json"):
+            os.remove(f"{os.getcwd()}/{exec_id}.json")
                 
         # Generate the command
         command = f"{path_to_binary} commit {exec_id} {path_to_file}"
@@ -410,6 +468,9 @@ class CustomKernel(IPyflowKernel):
             result = subprocess.run(command, shell=True, check=True, text=True, capture_output=True)
             # print("Command executed successfully:")
             os.remove(path_to_file)
+            # open json file so that sciunit can capture it.
+            with open(f'{exec_id}.json', 'r') as f:
+                f.read()
             # print(result.stdout)
         except subprocess.CalledProcessError as e:
             print("Error while executing the command:")
@@ -434,111 +495,134 @@ class CustomKernel(IPyflowKernel):
         # Run the command
         try:
             result = subprocess.run(command, shell=True, check=True, text=True, capture_output=True)
-            print("Checkout command executed successfully:")
-            print(result.stdout)
+            # print("Checkout command executed successfully:")
+            # print(result.stdout)
         except subprocess.CalledProcessError as e:
             # print("Error while executing the checkout command:")
             # print(e.stderr)
             pass
 
-    def persist_metadata(self, path, code, execution_count):
+    def persist_metadata(self, path, code):
         
         ## Get hash of code 
         ## Persist hash of code and execution counter in an sqlite database
         try:
-            metadata_handler = MetadataHandler(path, code, execution_id=execution_count)
-            metadata_handler.persist_metadata()
+            metadata_handler = MetadataHandler(path)
+            # c_id = metadata_handler.get_checkpoint(code, self.last_cid)
+            # if not c_id:
+            c_id = metadata_handler.persist_metadata(code, self.last_cid)
+            self.last_cid = c_id
+            # print(self.last_cid)
+
         except Exception as e:
-            print(f"Error persisting metadata: {e}")
             traceback.print_exc()
+            print(f"Error persisting metadata: {e}")
 
 
     
-    def load_memoized_cell(self, path, code, execution_count):
+    def load_memoized_cell(self, path, c_id):
         # gets execution id associated with the code
         # load data from from the persisted session files till the execution id starting from 0
-        metadata_handler = MetadataHandler(path, code, execution_id=execution_count)
-        exec_id, c = metadata_handler.get_metadata_from_db(code, execution_id=execution_count)
-        same = str(c) == str(code) and str(exec_id) == str(execution_count)
-        
-        if same:
-            loaded_vars = {}
-            for f in range(1, int(exec_id ) + 1):
-                self.run_checkout_command(f'{path}/vv', f, f'{path}/session/checkpoint_{f}.pkl')
-                fname = f'{path}/session/checkpoint_{f}.pkl'
-                if os.path.isfile(fname):
-                    with open(fname, 'rb') as dill_file:
-                        loaded_vars.update(dill.load(dill_file))
-                    os.remove(fname)
-        
             
-            
-            # update global namespace with loaded variables
-            for var in loaded_vars:
-                # loaded_vars[var] = loaded_vars[var]['obj']
-                self.shell.user_ns.update({var: loaded_vars[var]['obj']})
+        loaded_vars = {}
+        # for f in range(1, int(exec_id ) + 1):
+        self.run_checkout_command(f'{path}/vv', c_id, f'{path}/checkpoint_{c_id}.pkl')
+        fname = f'{path}/checkpoint_{c_id}.pkl'
+        if os.path.isfile(fname):
+            with open(fname, 'rb') as dill_file:
+                loaded_vars.update(dill.load(dill_file))
+            # os.remove(fname)
 
-            # Build dependency graph
-            deps_graph = {var: data['deps'] for var, data in loaded_vars.items() if data['obj'] is None}
+    
+        
+        # update global namespace with loaded variables
+        for var in loaded_vars:
+            # loaded_vars[var] = loaded_vars[var]['obj']
+            # print(loaded_vars['x']['obj'])
+            self.shell.user_ns.update({var: loaded_vars[var]['obj']})
 
-            # Get execution order using topological sort
-            execution_order = self.topological_sort(deps_graph)
-            # print(loaded_vars)
+        # Build dependency graph
+        deps_graph = {var: data['deps'] for var, data in loaded_vars.items() if data['obj'] is None}
 
-            namespace = self.shell.user_ns
+        # Get execution order using topological sort
+        execution_order = self.topological_sort(deps_graph)
+        # print(loaded_vars)
 
-            # self.shell.user_ns['A'] = None
+        namespace = self.shell.user_ns
 
+        # self.shell.user_ns['A'] = None
+
+        # print(namespace['A'])
+        # Execute code for each variable in order, only if missing
+        for var_name in execution_order:
+            # Check if the variable exists and is not None in the namespace
             # print(namespace['A'])
-            # Execute code for each variable in order, only if missing
-            for var_name in execution_order:
-                # Check if the variable exists and is not None in the namespace
-                # print(namespace['A'])
-                if var_name in namespace and namespace[var_name] is not None:
-                    continue  # Skip if the object already exists and is not None
-                
-                # print(loaded_vars[var_name])
-                code = str(loaded_vars[var_name]['code'])
-                # print(type(str(code)))
-                try:
-                    # Execute the code in the namespace
-                    # print("hello")
-                    exec(code, namespace)
-                    # If the variable isn't directly assigned, try to find it
-                    # if var_name not in namespace:
-                    #     for key, value in namespace.items():
-                    #         if hasattr(value, '__dict__') and var_name in value.__dict__:
-                    #             namespace[var_name] = value.__dict__[var_name]
-                    #             break
-                except Exception as e:
-                    print(f"Error restoring {var_name}: {str(e)}")
-                    continue
-                # print(f"Restored checkpoint {f}")                        
-                        
-                # else:
-                #     continue
-                #     print("No checkpoint found for the given ID")
-        
+            if var_name in namespace and namespace[var_name] is not None:
+                continue  # Skip if the object already exists and is not None
             
-            # ip = get_ipython()
-            # res =  await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
-            
-            # accessed_vars = ip.tracked_ns.accessed
-        #     to_dump = {}
-        #     for v in accessed_vars:
-        #         to_dump[v] = self.shell.user_ns[v]
+            # print(loaded_vars[var_name])
+            code = str(loaded_vars[var_name]['code'])
+            # print(type(str(code)))
+            try:
+                # Execute the code in the namespace
+                # print("hello")
+                exec(code, namespace)
+                # If the variable isn't directly assigned, try to find it
+                # if var_name not in namespace:
+                #     for key, value in namespace.items():
+                #         if hasattr(value, '__dict__') and var_name in value.__dict__:
+                #             namespace[var_name] = value.__dict__[var_name]
+                #             break
+            except Exception as e:
+                print(f"Error restoring {var_name}: {str(e)}")
+                continue
+            # print(f"Restored checkpoint {f}")                        
+                    
+            # else:
+            #     continue
+            #     print("No checkpoint found for the given ID")
+    
 
-        #     with open(f'{os.getcwd()}/session/checkpoint_{self.shell.execution_count - 1}.pkl', 'wb') as dill_file: 
-        #         # dill.dump_module(dill_file, self.shell)
-        #         # print(to_dump)
-        #         dill.dump(to_dump, dill_file)
-            
-        #     self.post_run_cell(ip)
-        #     return res
+    # @contextmanager
+    # def capture_iopub(self):
+    #     queue = SimpleQueue()
 
-        return same
+    #     original_send = self.send_response
 
-    def get_cell_outputs_by_execution_count(self, notebook_path, execution_count):
+    #     def capturing_send(socket, msg_type, content, parent=None, ident=None, buffers=None):
+    #         print("capturing")
+    #         if msg_type in ("execute_result", "stream", "error", "display_data"):
+    #             queue.put((msg_type, content))
+    #         original_send(socket, msg_type, content, parent, ident, buffers)
+
+    #     self.send_response = capturing_send
+    #     try:
+    #         yield queue
+    #     finally:
+    #         self.send_response = original_send
+
+    # @contextmanager
+    # def capture_ipython_outputs(self):
+    #     captured = []
+    #     orig_publish = self.shell.display_pub.publish
+
+    #     def wrapped_publish(data, metadata=None, source=None, transient=None, update=False):
+    #         # Capture IPython output before it goes to frontend
+    #         print("capturing")
+    #         captured.append({
+    #             "output_type": "display_data",
+    #             "data": copy.deepcopy(data),
+    #             "metadata": copy.deepcopy(metadata or {})
+    #         })
+    #         return orig_publish(data, metadata, source, transient, update)
+
+    #     self.shell.display_pub.publish = wrapped_publish
+    #     try:
+    #         yield captured
+    #     finally:
+    #         self.shell.display_pub.publish = orig_publish
+
+    def get_cell_outputs_by_execution_count(self, notebook_path, code):
         """Retrieve outputs for the cell with the specified execution_count."""
         if not notebook_path or not os.path.exists(notebook_path):
             return [{'type': 'error', 'text': f"Notebook not found at {notebook_path}"}]
@@ -552,8 +636,9 @@ class CustomKernel(IPyflowKernel):
             for cell in cells:
                 if cell.get('cell_type') != 'code':
                     continue
-                cell_execution_count = cell.get('execution_count')
-                if cell_execution_count == execution_count:
+                cell_code = cell.get('source')
+                # print(''.join(cell_code).replace("\n", ""), code.replace("\n", ""))
+                if ''.join(cell_code).replace("\n", "") == code.replace("\n", ""):
                     outputs = cell.get('outputs', [])
                     if not outputs:
                         return [{'type': 'text', 'text': ""}]
@@ -589,9 +674,9 @@ class CustomKernel(IPyflowKernel):
                                 'text': f"{output.get('ename', '')}: {output.get('execution_count', '')}"
                             })
                     return result
-            return [{'type': 'error', 'text': f"No cell found with execution_count {execution_count}"}]
+            return [{'type': 'error', 'text': f""}]
         except Exception as e:
-            return [{'type': 'error', 'text': f"Error reading notebook: {str(e)}"}]
+            return [{'type': 'error', 'text': f""}]
         
         
     async def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False, *
@@ -605,6 +690,40 @@ class CustomKernel(IPyflowKernel):
         notebook = self.shell.user_ns.get("__session__", None)
         notebook_path = "/".join(notebook.split("/")[:-1])
         
+        # check if notebook metadata says to audit it.
+        if not self.nb_initialized:
+            def post_run_hook(_):
+                with open(notebook, 'r', encoding='utf-8') as f:
+                    # Capture system call for sciunit to move notebook in sandbox
+                    f.read(1)
+                
+            # You can access result.info.raw_cell, result.result, etc.
+            ip.events.register("post_run_cell", post_run_hook)
+            # from IPython.display import Javascript
+            # from IPython.core.displaypub import publish_display_data
+            # def enable_autosave_from_kernel():
+            #     js = """
+            #     if (typeof Jupyter !== "undefined" && Jupyter.notebook) {
+            #         Jupyter.notebook.save_notebook();
+            #     }
+            #     """
+            #     publish_display_data({'application/javascript': js}, {})
+            # enable_autosave_from_kernel()
+            # Load notebook
+            nb = None
+            with open(notebook, 'r', encoding='utf-8') as f:
+                nb = nbformat.read(f, as_version=4)
+                # set to audit mode
+                if nb.metadata['AUDIT'] == "true":
+                    self.audit = True
+
+            if self.audit:
+                with open(notebook, 'w', encoding='utf-8') as f:
+                    nb.metadata['AUDIT'] = "false"
+                    nbformat.write(nb, f)                    
+          
+            self.nb_initialized = True
+
         # print(type(ip), type(ip.user_ns))
         self.pre_run_cell(ip, code)
 
@@ -626,7 +745,7 @@ class CustomKernel(IPyflowKernel):
                 if os.path.isfile(fname):
                     with open(fname, 'rb') as dill_file:
                         loaded_vars.update(dill.load(dill_file))
-                    os.remove(fname)
+                    # os.remove(fname)
         
             
             
@@ -702,66 +821,171 @@ class CustomKernel(IPyflowKernel):
         # #     self.initalized = True
         # #     patch_namespace(self.shell)
         
+        # if self.audit:
+        if code.strip().startswith('%') or code.strip().startswith('%%'):
+            # If the code is a magic command, execute it directly
+            res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
+            self.post_run_cell(ip)
+            return res
+        
+
+        # c_id = MetadataHandler(notebook_path).get_checkpoint(code, self.last_cid)
+        c_id = MetadataHandler(notebook_path).get_checkpoint(code, self.last_cid)
+        # print(c_id)
+        if self.audit:
+            # print("auditing")            
+            res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
+            if not c_id:
+                self.persist_metadata(notebook_path, code)
+                self.dump(ip)
+                self.run_commit_command(f'{notebook_path}/vv', self.last_cid, f'{notebook_path}/checkpoint_{self.last_cid}.pkl')
+            return res
+        else:
+            if c_id:
+                # print("restoring")
+                self.load_memoized_cell(notebook_path, c_id)
+                # if not silent:
+                #     try:
+                #         output_list = json.loads(outputs)
+                #         for output in output_list:
+                #             self.send_response(self.iopub_socket, output.get("output_type"), output)
+                #     except Exception as e:
+                #         # self.log.warning(f"Failed to replay outputs: {e}")
+                #         pass
+
+                outputs = self.get_cell_outputs_by_execution_count(notebook, code)
+                output_text = []
+                for output in outputs:
+                    output_text.append(output['text'])
+                output_text = '\n'.join(output_text) or ""
+                
+                self.shell.execution_count += 1
+                self.send_response(self.iopub_socket, 'execute_result', {
+                    'execution_count': self.shell.execution_count,
+                    'data': {'text/plain': output_text},
+                    'metadata': {}
+                })
+
+                self.post_run_cell(ip)
+                self.last_cid = c_id
+                self.shell.execution_count += 1
+                return {
+                    "status": "ok",
+                    "execution_count": self.shell.execution_count,
+                    "payload": [],
+                    "user_expressions": {},
+                }
+                
+
+                self.post_run_cell(ip)
+                self.last_cid = c_id
+                # return {
+                #     "status": "ok",
+                #     "execution_count": self.shell.execution_count,
+                #     "payload": [],
+                #     "user_expressions": {},
+                # }
+            else:
+                # "just executing"
+                res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
+                return res       
+        
+        # c_id = MetadataHandler(notebook_path).get_checkpoint(code, self.last_cid)
+        # if c_id and not self.audit:
+        #     self.load_memoized_cell(notebook_path, c_id)
+        #     outputs = self.get_cell_outputs_by_execution_count(notebook, self.shell.execution_count)
+        #     output_text = []
+        #     for output in outputs:
+        #         output_text.append(output['text'])
+        #     output_text = '\n'.join(output_text) or ""
+            
+        #     self.shell.execution_count += 1
+        #     self.send_response(self.iopub_socket, 'execute_result', {
+        #         'execution_count': self.shell.execution_count,
+        #         'data': {'text/plain': output_text},
+        #         'metadata': {}
+        #     })
+
+        #     self.post_run_cell(ip)
+        #     self.last_cid = c_id
+        #     return {
+        #         "status": "ok",
+        #         "execution_count": self.shell.execution_count,
+        #         "payload": [],
+        #         "user_expressions": {},
+        #     }
+        # else:
+        #     res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
+        #     if self.audit:
+        #         if not c_id:
+        #             self.persist_metadata(notebook_path, code)
+        #             self.dump(ip)
+        #             self.run_commit_command(f'{notebook_path}/vv', self.last_cid, f'{notebook_path}/checkpoint_{self.last_cid}.pkl')
+        #     self.post_run_cell(ip)
+        #     if not self.audit:
+        #         self.last_cid = None # because the user ran a cell breaking the checkpoint graph order
+        #     return res
+            
         if not self.nb_initialized:
             self.shell.run_line_magic("flow", "mode normal")
             # exec("%flow mode normal", self.shell.user_ns)
             self.nb_initialized = True
                 
-        # print(cell_meta)
-        if not self.diverged:
-            # if code ran did change compared to persisted metadata set diverged to True
-            # print(self.shell.execution_count)
-            same = self.load_memoized_cell(notebook_path, code, self.shell.execution_count)
-            if same:
-                print("hello")
-                # cell_meta["skip_execution"] = True
-                # print(res["payload"])
-                # res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin, cell_meta=cell_meta, cell_id=cell_id)
-                # res = await super().do_execute(code, True, False, {}, allow_stdin, cell_meta=cell_meta, cell_id=cell_id)
-                # print(res["payload"])
-                # return
+        # # print(cell_meta)
+        # if not self.diverged:
+        #     # if code ran did change compared to persisted metadata set diverged to True
+        #     # print(self.shell.execution_count)
+        #     same = self.load_memoized_cell(notebook_path, code, self.shell.execution_count)
+        #     if same:
+        #         print("hello")
+        #         # cell_meta["skip_execution"] = True
+        #         # print(res["payload"])
+        #         # res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin, cell_meta=cell_meta, cell_id=cell_id)
+        #         # res = await super().do_execute(code, True, False, {}, allow_stdin, cell_meta=cell_meta, cell_id=cell_id)
+        #         # print(res["payload"])
+        #         # return
                 
-                outputs = self.get_cell_outputs_by_execution_count(notebook, self.shell.execution_count)
-                output_text = []
-                for output in outputs:
-                    # if output['type'] == 'error':
-                    #     output_text.append(f"Error: {output['text']}")
-                    # elif output['type'] == 'stream':
-                    #     output_text.append(f"{output['name']}: {output['text']}")
-                    # else:
-                    output_text.append(output['text'])
-                output_text = '\n'.join(output_text) or ""
-                # print(output_text)
+        #         outputs = self.get_cell_outputs_by_execution_count(notebook, self.shell.execution_count)
+        #         output_text = []
+        #         for output in outputs:
+        #             # if output['type'] == 'error':
+        #             #     output_text.append(f"Error: {output['text']}")
+        #             # elif output['type'] == 'stream':
+        #             #     output_text.append(f"{output['name']}: {output['text']}")
+        #             # else:
+        #             output_text.append(output['text'])
+        #         output_text = '\n'.join(output_text) or ""
+        #         # print(output_text)
                 
-                self.shell.execution_count += 1
-                self.send_response(self.iopub_socket, 'execute_result', {
-                    'execution_count': self.execution_count - 1,
-                    'data': {'text/plain': output_text},
-                    'metadata': {}
-                })
+        #         self.shell.execution_count += 1
+        #         self.send_response(self.iopub_socket, 'execute_result', {
+        #             'execution_count': self.execution_count - 1,
+        #             'data': {'text/plain': output_text},
+        #             'metadata': {}
+        #         })
 
-                # res["execution_count"] = self.shell.execution_count - 1
-                # return res
-                # self.shell.displayhook.disable()
-                # self.shell.display_pub.publish = lambda *args, **kwargs: None
-                # # return res
-                # self.diverged = not same
-                # self.shell.execution_count += 1
-                # /Users/talhaazaz/Documents/DePaul/Research/NBRewind/CIKM_NB_v2.ipynb
+        #         # res["execution_count"] = self.shell.execution_count - 1
+        #         # return res
+        #         # self.shell.displayhook.disable()
+        #         # self.shell.display_pub.publish = lambda *args, **kwargs: None
+        #         # # return res
+        #         # self.diverged = not same
+        #         # self.shell.execution_count += 1
+        #         # /Users/talhaazaz/Documents/DePaul/Research/NBRewind/CIKM_NB_v2.ipynb
                 
                 
-                return {
-                    "status": "ok",
-                    "execution_count": self.shell.execution_count - 1,
-                    "payload": [],
-                    "user_expressions": {},
-                }
-            # from IPython.core.interactiveshell import DisplayHook
-            # self.shell.displayhook = DisplayHook(self.shell)
-            self.diverged = not same
+        #         return {
+        #             "status": "ok",
+        #             "execution_count": self.shell.execution_count - 1,
+        #             "payload": [],
+        #             "user_expressions": {},
+        #         }
+        #     # from IPython.core.interactiveshell import DisplayHook
+        #     # self.shell.displayhook = DisplayHook(self.shell)
+        #     self.diverged = not same
 
-        print("executing")
-        res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
+        # print("executing")
+        # res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
         
         # # if end_time - start_time > Threshold and res["status"] == "ok":
         # #     self.dump_namespace()
@@ -810,13 +1034,12 @@ class CustomKernel(IPyflowKernel):
         #     # dill.dump_module(dill_file, self.shell)
         #     dill.dump(to_persist, dill_file)
         
-        print("persisting metadata")
+        # print("persisting metadata")
         
-        self.persist_metadata(notebook_path, code, self.shell.execution_count - 1)
-        self.dump(ip)
-        print(os.getcwd())
-        self.run_commit_command(f'{notebook_path}/vv', self.shell.execution_count - 1, f'{notebook_path}/session/checkpoint_{self.shell.execution_count - 1}.pkl')
-        self.post_run_cell(ip) 
+        # self.persist_metadata(notebook_path, code, self.shell.execution_count - 1)
+        # self.dump(ip)
+        # self.run_commit_command(f'{notebook_path}/vv', self.shell.execution_count - 1, f'{notebook_path}/session/checkpoint_{self.shell.execution_count - 1}.pkl')
+        # self.post_run_cell(ip) 
         # end = time.time()
 
         # self.average_checkpoint_time = (self.average_checkpoint_time + (end - start)) / 2
@@ -827,7 +1050,7 @@ class CustomKernel(IPyflowKernel):
         # print("times: ", self.times)    
         # print("checkpnt_times: ", self.checkpnt_times)
 
-        return res
+        # return res
 
 
 if __name__ == '__main__':

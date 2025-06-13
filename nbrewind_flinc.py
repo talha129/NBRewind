@@ -225,6 +225,7 @@ class CustomKernel(IPyflowKernel):
         self.average_checkpoint_time = 0
         # self.times = []
         # self.checkpnt_times = []
+        self.total_vars = set()
         self.nb_initialized = False
         self.diverged = False
         self.audit = False
@@ -385,52 +386,187 @@ class CustomKernel(IPyflowKernel):
             raise ValueError("Circular dependency detected")
         return result
 
-    def dump(self, ip):
-        globals_accessed = {k for k in ip.variable_tracker.potential_accessed if k in ip.user_ns}
+    def dump1(self, ip):
+        # to_persist = {}
+        # self.total_vars.update({k for k in ip.variable_tracker.potential_accessed if k in ip.user_ns})
+        # for var in self.total_vars:
+        #     obj = None
+        #     # if var.is_module:
+        #     #     obj = var.obj
+        #     # else:
+        #     if self.can_dill_serialize(self.shell.user_ns[var]):
+        #         obj = self.shell.user_ns[var]
+        #     to_persist[var] = {'obj': obj, 'code': code( self.getSym(id(self.shell.user_ns[var]), var) ), 'deps': self.get_deps( self.getSym(id(self.shell.user_ns[var]), var) )}
+
+        # with open(f'{os.getcwd()}/checkpoint_{self.last_cid}.pkl', 'wb') as dill_file: 
+        #     # dill.dump_module(dill_file, self.shell)
+        #     dill.dump(to_persist, dill_file)
+        # print(self.total_vars)
+
         exclusion_list = ["print", "display", "fake_edge_sym", "ipyflow", "flow", "aliases", "_"]
+        globals_accessed = {k for k in ip.variable_tracker.potential_accessed if k in ip.user_ns}
+        
         to_persist = {}
-        # print(ip.tracked_ns.accessed)
-        for mem in flow().aliases:
-            entrySet = flow().aliases[mem]
-            varSet = []
-            should_persist = False
+        co_variables = []  # List of sets, where each set contains connected variables
+        
+        # Go through all memory locations
+        for _, entrySet in flow().aliases.items():
+            # Create set of variables for current memory location
+            varSet = set()
             for entry in entrySet:
-                
-                var = None
                 if entry.readable_name.startswith("<literal_sym_"):
-                    continue
+                            continue
                 if "__ipyflow_mutation" in entry.readable_name:
                     continue
                 
-                # print(entry, entry.full_path)
-                # print(entry, entry.is_module)
-                
                 if not entry.is_module and not entry.is_anonymous:
                     var = entry.full_path[1]
-                # if not entry.is_anonymous:
-                #     var = entry.full_path[1]  
-                if var in exclusion_list:
+
+                    if var in exclusion_list:
+                        continue
+
+                    if var:
+                        varSet.add(var)
+            
+            # If no valid variables found, skip
+            if not varSet:
+                continue
+                
+            new_co_variables = []
+            merged_set = varSet
+            # print("varSet", merged_set)
+            for s in co_variables:
+                if len(s & merged_set) == 0:
+                    ## this is not affected, add this to the result
+                    new_co_variables.append(s)
+                else:
+                    merged_set |= s
+                    # print("merged", merged_set)
+            new_co_variables.append(merged_set)
+            co_variables = new_co_variables
+
+        
+        ## go over globals and persist only co_variables that were affected
+        for g in globals_accessed:
+            for co_var in co_variables:
+                if g not in co_var:
                     continue
+
+                ## persist co_variable
+                for var in co_var:
+                    obj = None
+                    if self.can_dill_serialize(self.shell.user_ns[var]):
+                        obj = self.shell.user_ns[var]
+                    to_persist[var] = {'obj': obj, 'code': code( self.getSym(id(self.shell.user_ns[var]), var) ), 'deps': self.get_deps( self.getSym(id(self.shell.user_ns[var]), var) )}
+
+        with open(f'{os.getcwd()}/checkpoint_{self.last_cid}.pkl', 'wb') as dill_file: 
+            dill.dump(to_persist, dill_file)
+       
+        
+    def dump(self, ip):
+            exclusion_list = ["print", "display", "fake_edge_sym", "ipyflow", "flow", "aliases", "_"]
+            globals_accessed = {k for k in ip.variable_tracker.potential_accessed if k in ip.user_ns}
+            
+            to_persist = {}
+            # Keep track of previous size to detect changes
+            prev_size = 0
+            
+            # Iterate until globals_accessed stops growing
+            while len(globals_accessed) != prev_size:
+                prev_size = len(globals_accessed)
+                
+                # Create a copy of the keys to avoid modification during iteration
+                # memory_locations = list(flow().aliases.keys())
+                
+                # Go through all memory references
+                for mem in flow().aliases:
+                    entrySet = flow().aliases[mem]
+                    varSet = []
+                    
+                    # Check if any of the variables in this memory location are in globals_accessed
+                    should_add = False
+                    for entry in entrySet:
+                        if entry.readable_name.startswith("<literal_sym_"):
+                            continue
+                        if "__ipyflow_mutation" in entry.readable_name:
+                            continue
+                        
+                        if not entry.is_module and not entry.is_anonymous:
+                            var = entry.full_path[1]
+                            if var in exclusion_list:
+                                continue
+                            
+                            if var:
+                                varSet.append(var)
+                                if var in globals_accessed:
+                                    should_add = True
+                    
+                    # If any variable in this memory location is in globals_accessed,
+                    # add all other variables from this memory location
+                    if should_add:
+                        for var in varSet:
+                            obj = None
+                            # if var.is_module:
+                            #     obj = var.obj
+                            # else:
+                            if self.can_dill_serialize(self.shell.user_ns[var]):
+                                obj = self.shell.user_ns[var]
+                            to_persist[var] = {'obj': obj, 'code': code( self.getSym(id(self.shell.user_ns[var]), var) ), 'deps': self.get_deps( self.getSym(id(self.shell.user_ns[var]), var) )}
+                        globals_accessed.update(varSet)
+
+            with open(f'{os.getcwd()}/checkpoint_{self.last_cid}.pkl', 'wb') as dill_file: 
+                # dill.dump_module(dill_file, self.shell)
+                dill.dump(to_persist, dill_file)
+            print(globals_accessed)
+                
+
+        # globals_accessed = {k for k in ip.variable_tracker.potential_accessed if k in ip.user_ns}
+        # exclusion_list = ["print", "display", "fake_edge_sym", "ipyflow", "flow", "aliases", "_"]
+        # to_persist = {}
+        # # print(ip.tracked_ns.accessed)
+        # for mem in flow().aliases:
+        #     entrySet = flow().aliases[mem]
+        #     varSet = []
+        #     should_persist = False
+        #     for entry in entrySet:
+                
+        #         var = None
+        #         if entry.readable_name.startswith("<literal_sym_"):
+        #             continue
+        #         if "__ipyflow_mutation" in entry.readable_name:
+        #             continue
+                
+        #         # print(entry, entry.full_path)
+        #         # print(entry, entry.is_module)
+                
+        #         if not entry.is_module and not entry.is_anonymous:
+        #             var = entry.full_path[1]
+        #         # if not entry.is_anonymous:
+        #         #     var = entry.full_path[1]  
+        #         if var in exclusion_list:
+        #             continue
                
-                # print(entry.full_path)
-                if var:
-                    varSet.append(var)
-                if var in globals_accessed: 
-                    should_persist = True
+        #         # print(entry.full_path)
+        #         if var:
+        #             varSet.append(var)
+        #         if var in globals_accessed: 
+        #             should_persist = True
 
                 
             
-            # print(varSet, entrySet)
-            for var in varSet:
-                if should_persist:
-                    obj = None
-                    # if var.is_module:
-                    #     obj = var.obj
-                    # else:
-                    if self.can_dill_serialize(self.shell.user_ns[var]):
-                        obj = self.shell.user_ns[var]                    
-                    to_persist[var] = {'obj': obj, 'code': code( self.getSym(id(self.shell.user_ns[var]), var) ), 'deps': self.get_deps( self.getSym(id(self.shell.user_ns[var]), var) )}
-                    #  NamedObject(self.shell.user_ns[var], code( self.getSym(id(self.shell.user_ns[var]), var) ))
+                # print(varSet, entrySet)
+                # for var in varSet:
+                #     if should_persist:
+                #         obj = None
+                
+                # for var in globals_accessed:
+                #     if var.is_module:
+                #         obj = var.obj
+                #     # else:
+                #     if self.can_dill_serialize(self.shell.user_ns[var]):
+                #         obj = self.shell.user_ns[var]                    
+                #     to_persist[var] = {'obj': obj, 'code': code( self.getSym(id(self.shell.user_ns[var]), var) ), 'deps': self.get_deps( self.getSym(id(self.shell.user_ns[var]), var) )}
+                            #  NamedObject(self.shell.user_ns[var], code( self.getSym(id(self.shell.user_ns[var]), var) ))
 
         # for var in to_persist.keys():
         #     if var == 'obj1':
@@ -439,10 +575,10 @@ class CustomKernel(IPyflowKernel):
                     
                 
         # print("Persisted Variables: ", to_persist.keys())
-        with open(f'{os.getcwd()}/checkpoint_{self.last_cid}.pkl', 'wb') as dill_file: 
-            # dill.dump_module(dill_file, self.shell)
-            # print(to_persist)
-            dill.dump(to_persist, dill_file)
+        # with open(f'{os.getcwd()}/checkpoint_{self.last_cid}.pkl', 'wb') as dill_file: 
+        #     # dill.dump_module(dill_file, self.shell)
+        #     # print(to_persist)
+        #     dill.dump(to_persist, dill_file)
 
     def run_commit_command(self, path_to_binary, exec_id, path_to_file):
         """
@@ -682,14 +818,84 @@ class CustomKernel(IPyflowKernel):
     async def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False, *
                         ,cell_meta=None, cell_id=None,):
 
-        
-        
-        start = time.time()
         ip = self.shell
+        
         #path to notebook directory
         notebook = self.shell.user_ns.get("__session__", None)
         notebook_path = "/".join(notebook.split("/")[:-1])
         
+        # def analyze_algorithm():
+        #     # Initial setup
+        #     co_variables = []  # List of sets, where each set contains connected variables
+            
+        #     # Go through all memory locations
+        #     for obj_id, entrySet in flow().aliases.items():
+        #         # Create set of variables for current memory location
+        #         varSet = set()
+        #         for entry in entrySet:
+        #             if (entry.readable_name.startswith("<literal_sym_") or 
+        #                 "__ipyflow_mutation" in entry.readable_name or
+        #                 entry.is_module or entry.is_anonymous):
+        #                 continue
+                        
+        #             var = entry.full_path[1]
+        #             if var and var not in ["print", "display", "fake_edge_sym", "ipyflow", "flow", "aliases", "_"]:
+        #                 varSet.add(var)
+                
+        #         # If no valid variables found, skip
+        #         if not varSet:
+        #             continue
+                    
+        #         new_co_variables = []
+        #         merged_set = varSet
+        #         # print("varSet", merged_set)
+        #         for s in co_variables:
+        #             if len(s & merged_set) == 0:
+        #                 ## this is not affected, add this to the result
+        #                 new_co_variables.append(s)
+        #                 # print("not merging", merged_set, s)
+        #             else:
+        #                 # print("merging", merged_set, s)
+        #                 # print("merging", merged_set, s)
+        #                 merged_set |= s
+        #                 # print("merged", merged_set)
+        #         new_co_variables.append(merged_set)
+        #         co_variables = new_co_variables
+        #         # print("co_vars", co_variables)
+                
+        #         # merged_indices = set()
+        #         # for var in varSet:
+        #         #     for i, s in enumerate(co_variables):
+        #         #         if var in s:
+        #         #             merged_indices.add(i)
+
+        #         #             # sets_to_merge.append(s)  # Store the actual set, not the index
+                
+        #         # # print(sets_to_merge)
+        #         # if sets_to_merge:
+        #         #     # Merge all sets that contain any variable from varSet
+        #         #     merged_set = varSet.union(*sets_to_merge)
+        #         #     print("sets_to_merge", sets_to_merge)
+        #         #     # Remove old sets
+        #         #     for s in sets_to_merge:
+        #         #         print("removing", s, co_variables)
+        #         #         co_variables.remove(s)
+        #         #     # Add merged set
+        #         #     co_variables.append(merged_set)
+        #         # else:
+        #         #     # If no merging happened, add varSet as new set
+        #         #     co_variables.append(varSet)
+            
+        #     print("co_vars", co_variables)
+        #     return co_variables
+                    
+        
+        # self.pre_run_cell(ip, code)
+        # res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
+        # analyze_algorithm()
+        # self.post_run_cell(ip)
+        # return res
+    
         # check if notebook metadata says to audit it.
         if not self.nb_initialized:
             def post_run_hook(_):
@@ -711,16 +917,16 @@ class CustomKernel(IPyflowKernel):
             # enable_autosave_from_kernel()
             # Load notebook
             nb = None
-            with open(notebook, 'r', encoding='utf-8') as f:
-                nb = nbformat.read(f, as_version=4)
-                # set to audit mode
-                if nb.metadata['AUDIT'] == "true":
-                    self.audit = True
+            # with open(notebook, 'r', encoding='utf-8') as f:
+            #     nb = nbformat.read(f, as_version=4)
+            #     # set to audit mode
+            #     if nb.metadata['AUDIT'] == "true":
+            #         self.audit = True
 
-            if self.audit:
-                with open(notebook, 'w', encoding='utf-8') as f:
-                    nb.metadata['AUDIT'] = "false"
-                    nbformat.write(nb, f)                    
+            # if self.audit:
+            #     with open(notebook, 'w', encoding='utf-8') as f:
+            #         nb.metadata['AUDIT'] = "false"
+            #         nbformat.write(nb, f)                    
           
             self.nb_initialized = True
 
@@ -837,7 +1043,7 @@ class CustomKernel(IPyflowKernel):
             res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
             if not c_id:
                 self.persist_metadata(notebook_path, code)
-                self.dump(ip)
+                self.dump1(ip)
                 self.run_commit_command(f'{notebook_path}/vv', self.last_cid, f'{notebook_path}/checkpoint_{self.last_cid}.pkl')
             return res
         else:

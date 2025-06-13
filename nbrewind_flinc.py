@@ -917,16 +917,16 @@ class CustomKernel(IPyflowKernel):
             # enable_autosave_from_kernel()
             # Load notebook
             nb = None
-            with open(notebook, 'r', encoding='utf-8') as f:
-                nb = nbformat.read(f, as_version=4)
-                # set to audit mode
-                if nb.metadata['AUDIT'] == "true":
-                    self.audit = True
+            # with open(notebook, 'r', encoding='utf-8') as f:
+            #     nb = nbformat.read(f, as_version=4)
+            #     # set to audit mode
+            #     if nb.metadata['AUDIT'] == "true":
+            #         self.audit = True
 
-            if self.audit:
-                with open(notebook, 'w', encoding='utf-8') as f:
-                    nb.metadata['AUDIT'] = "false"
-                    nbformat.write(nb, f)                    
+            # if self.audit:
+            #     with open(notebook, 'w', encoding='utf-8') as f:
+            #         nb.metadata['AUDIT'] = "false"
+            #         nbformat.write(nb, f)                    
           
             self.nb_initialized = True
 

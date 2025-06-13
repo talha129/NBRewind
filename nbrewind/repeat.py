@@ -3,14 +3,14 @@ import json
 import shutil
 from jupyter_client.kernelspec import KernelSpecManager
 
-def get_repeat_kernel(eid):
+def get_repeat_kernel(eid, nbrewind_path, repeat_handler_path):
     # -TODOO: Fix hardcoded paths for repeat-handler 
     # Fix hardcoded paths nbrewind.py  
     return {
             "argv": [
-                "/home/admin/Talha/nbrewind/Flinc/repeat-handler.py",
+                f"{repeat_handler_path}",
                 "sciunit", "given", "{connection_file}", "repeat", f"e{eid}",
-                "/home/admin/Talha/nbrewind/nbrewind.py","-f",
+                f"{nbrewind_path}","-f",
                 "%"
             ],
             "env": {
@@ -24,14 +24,24 @@ def install_repeat_kernel(eid):
     ksm = KernelSpecManager()
     kernels_dir = ksm.user_kernel_dir  # usually ~/.local/share/jupyter/kernels
 
+    audit_kernel_name = "audit-kernel"
+    audit_kernel_path = os.path.join(kernels_dir, audit_kernel_name)
+    repeat_handler_path = os.path.join(audit_kernel_path, "repeat_handler.py")
+    
     kernel_name = f"nbrewind-repeat"
     kernel_path = os.path.join(kernels_dir, kernel_name)
 
     # Create or update the kernel directory
     os.makedirs(kernel_path, exist_ok=True)
 
+    nbrewind_path = ""
+    # Read the existing kernel.json
+    with open(os.path.join(audit_kernel_path, "kernel.json"), 'r') as f:
+        kernel_json = json.load(f)   
+        nbrewind_path = kernel_json["argv"][4]
+
     # Write or overwrite kernel.json
-    kernel_spec = get_repeat_kernel(eid)
+    kernel_spec = get_repeat_kernel(eid, nbrewind_path, repeat_handler_path)
     kernel_json_path = os.path.join(kernel_path, "kernel.json")
 
     with open(kernel_json_path, "w") as f:

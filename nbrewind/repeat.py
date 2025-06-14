@@ -8,7 +8,7 @@ def get_repeat_kernel(eid, nbrewind_path, repeat_handler_path):
     # Fix hardcoded paths nbrewind.py  
     return {
             "argv": [
-                f"{repeat_handler_path}",
+                "python", f"{repeat_handler_path}",
                 "sciunit", "given", "{connection_file}", "repeat", f"e{eid}",
                 f"{nbrewind_path}","-f",
                 "%"
@@ -38,7 +38,7 @@ def install_repeat_kernel(eid):
     # Read the existing kernel.json
     with open(os.path.join(audit_kernel_path, "kernel.json"), 'r') as f:
         kernel_json = json.load(f)   
-        nbrewind_path = kernel_json["argv"][4]
+        nbrewind_path = kernel_json["argv"][5]
 
     # Write or overwrite kernel.json
     kernel_spec = get_repeat_kernel(eid, nbrewind_path, repeat_handler_path)

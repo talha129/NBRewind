@@ -15,8 +15,8 @@ def update_and_install_kernels():
     with open(kernel_json_path, 'r') as f:
         kernel_json = json.load(f)    
     # Update the paths
-    kernel_json["argv"][0] = handler_path
-    kernel_json["argv"][4] = nbrewind_path
+    kernel_json["argv"][1] = handler_path
+    kernel_json["argv"][5] = nbrewind_path
 
     with open(kernel_json_path, 'w') as f:
         json.dump(kernel_json, f, indent=4)

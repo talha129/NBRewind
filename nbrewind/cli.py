@@ -7,7 +7,7 @@ import nbformat
 from jupyter_client.kernelspec import KernelSpecManager
 from .notebook_version import NotebookVersion
 from .repeat import install_repeat_kernel, remove_kernel
-from .extend import setup_extend_kernel_env
+from .extend import setup_extend_kernel_env, patch_sciunit
 from sciunit2.records import ExecutionManager
 
 def get_last_execution(sciunit_project):
@@ -71,7 +71,7 @@ def audit_notebook(notebook_path):
     # wait for the kernel to finish and then exit
 
     try:
-        _ = subprocess.run(['jupyter', 'notebook', f'{notebook_path}', '--no-browser', '--ip=0.0.0.0', '--port=8889'], check=True)
+        p = subprocess.run(['jupyter', 'notebook', f'{notebook_path}', '--no-browser', '--ip=0.0.0.0', '--port=8889'], check=True)
         # print("hello")
     except KeyboardInterrupt:
         eid = get_last_execution(sciunit_project)
@@ -138,6 +138,7 @@ def extend(notebook_path):
     
     #setu up development envrionment
     venv_path, audit_dir = setup_extend_kernel_env(f"e{eid}")
+    patch_sciunit(eid)
     
     # # create a new shell in which activate the development env and run jupyter notebook there
     try:

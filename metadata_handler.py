@@ -143,3 +143,23 @@ class MetadataHandler:
             return {}
         finally:
             connection.close()
+
+    def get_all_checkpoints(self):
+        # retrieve all c_id
+        try:
+            connection = connect(f'{self.path}/metadata.db')
+            cursor = connection.cursor()
+            
+            # Query the database for all c_id with the given parent_cid
+            cursor.execute('''
+                SELECT c_id, code FROM metadata 
+            ''')
+            results = cursor.fetchall()
+            
+            # Return a dictionary of c_ids and codes
+            return {row[0]: row[1] for row in results}
+        except OperationalError as e:
+            print(f"An error occurred: {e}")
+            return {}
+        finally:
+            connection.close()

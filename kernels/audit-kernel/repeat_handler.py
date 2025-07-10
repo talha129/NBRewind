@@ -27,6 +27,6 @@ sys.stdout = open('flinc.log', 'a')
 sys.stderr = open('flinc.log', 'a')
 signal.signal(signal.SIGINT, sigIntHandler)
 signal.signal(signal.SIGTERM, sigTermHandler)
-subprocess.run(["/bin/bash", "-c", f"AUDIT=false sciunit given {sys.argv[3]} repeat e1 /home/admin/Talha/nbrewind/nbrewind.py -f %"])
+subprocess.run(["/bin/bash", "-c", f"AUDIT=false sciunit given {sys.argv[3]} repeat {sys.argv[5]} {sys.argv[6]} -f %"])
 
 #subprocess.run(sys.argv[1:])

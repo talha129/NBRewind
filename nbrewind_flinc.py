@@ -26,8 +26,6 @@ from IPython.core.interactiveshell import InteractiveShell
 from IPython.core.magic import Magics, magics_class, line_magic
 import nbformat
 
-from contextlib import contextmanager
-from queue import SimpleQueue
 
 class NamedObject:
 
@@ -43,6 +41,37 @@ import copy
 from metadata_handler import MetadataHandler
 
 
+# class VariableTracker(ast.NodeVisitor):
+#     def __init__(self):
+#         self.potential_accessed = set()
+#         self.potential_changed = set()
+#         self.global_vars = set()
+
+#     def visit_Name(self, node):
+#         self.potential_accessed.add(node.id)
+#         if isinstance(node.ctx, ast.Load):
+#             self.potential_accessed.add(node.id)
+#         elif isinstance(node.ctx, ast.Store):
+#             self.potential_accessed.add(node.id)
+#         # print(node.id)
+#         self.generic_visit(node)
+
+#     def visit_Import(self, node):
+#         # print(node.names)
+#         for alias in node.names:
+#             # print(alias.asname or alias.name)
+#             self.potential_accessed.add(alias.asname or alias.name)
+#             # self.global_vars.add(alias.asname or alias.name)
+#         self.generic_visit(node)
+
+#     def visit_ImportFrom(self, node):
+       
+#         for alias in node.names:
+#             # print(alias.asname or alias.name)
+#             self.potential_accessed.add(alias.asname or alias.name)
+#             # self.global_vars.add(alias.asname or alias.name)
+#         self.generic_visit(node)
+
 class VariableTracker(ast.NodeVisitor):
     def __init__(self):
         self.potential_accessed = set()
@@ -50,28 +79,32 @@ class VariableTracker(ast.NodeVisitor):
         self.global_vars = set()
 
     def visit_Name(self, node):
-        self.potential_accessed.add(node.id)
         if isinstance(node.ctx, ast.Load):
             self.potential_accessed.add(node.id)
         elif isinstance(node.ctx, ast.Store):
             self.potential_accessed.add(node.id)
-        # print(node.id)
         self.generic_visit(node)
 
     def visit_Import(self, node):
-        # print(node.names)
         for alias in node.names:
-            # print(alias.asname or alias.name)
             self.potential_accessed.add(alias.asname or alias.name)
-            # self.global_vars.add(alias.asname or alias.name)
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node):
-       
         for alias in node.names:
-            # print(alias.asname or alias.name)
             self.potential_accessed.add(alias.asname or alias.name)
-            # self.global_vars.add(alias.asname or alias.name)
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node):
+        self.potential_accessed.add(node.name)
+        self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node):
+        self.potential_accessed.add(node.name)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node):
+        self.potential_accessed.add(node.name)
         self.generic_visit(node)
 
 
@@ -186,6 +219,62 @@ class NbRewindMagics(Magics):
         # else:
         #     print("Usage: %audit on|off")
     
+    @line_magic
+    def restore(self, line):
+        """Restore a checkpoint by ID"""
+        # restore the checkpoint with the given id
+        # if no id is given, restore the last checkpoint
+        # if not line.strip():
+        #     c_id = self.kernel.last_cid
+        # else:
+        try:
+            c_id = int(line.strip())
+        except ValueError:
+            print("Invalid checkpoint ID. Please provide a valid integer.")
+            return
+        
+        #path to notebook directory
+        notebook = self.kernel.shell.user_ns.get("__session__", None)
+        path = "/".join(notebook.split("/")[:-1])
+        
+        loaded_vars = {}
+        # for f in range(1, int(exec_id ) + 1):
+        self.kernel.run_checkout_command(f'{path}/vv', c_id, f'{path}/checkpoint_{c_id}.pkl')
+        fname = f'{path}/checkpoint_{c_id}.pkl'
+        if os.path.isfile(fname):
+            with open(fname, 'rb') as dill_file:
+                loaded_vars.update(dill.load(dill_file))
+            # os.remove(fname)
+
+    
+        
+        # update global namespace with loaded variables
+        for var in loaded_vars:
+            # loaded_vars[var] = loaded_vars[var]['obj']
+            # print(loaded_vars['x']['obj'])
+            self.kernel.shell.user_ns.update({var: loaded_vars[var]['obj']})
+
+        self.kernel.last_cid = c_id
+
+    @line_magic
+    def show_all(self, line):
+        # show all available checkpoints
+        """Show all checkpoints"""
+
+        if line.strip().lower() == 'next checkpoints' or line.strip().lower() == 'next checkpoint':
+            notebook = self.kernel.shell.user_ns.get("__session__", None)
+            notebook_path = "/".join(notebook.split("/")[:-1])
+            metadata_handler = MetadataHandler(notebook_path)
+            
+            res = metadata_handler.get_all_checkpoints()
+            
+            for c_id, c in res.items():
+                print("##################")
+                print(f"Checkpoint ID: {c_id}")
+                print(f"{c}")
+                print("##################")
+
+
     @line_magic
     def show(self, line):
         # show next available checkpoints based on clast ran cell
@@ -307,7 +396,7 @@ class CustomKernel(IPyflowKernel):
         try:
             tree = ast.parse(code)
             ip.variable_tracker.visit(tree)
-            # print(ip.variable_tracker.÷potential_accessed)
+            # print(ip.variable_tracker.potential_accessed)
         except SyntaxError:
             pass
 
@@ -386,6 +475,100 @@ class CustomKernel(IPyflowKernel):
             raise ValueError("Circular dependency detected")
         return result
 
+    def clean_function_object_robust(self, func):
+        """More robust function cleaning that handles multiple edge cases"""
+        import types
+        import copy
+        
+        try:
+            func_copy = copy.deepcopy(func)
+            original_code = func.__code__
+            
+            # Clean co_names (global variables)
+            clean_names = tuple(name for name in original_code.co_names 
+                            if not any(pattern in name for pattern in [
+                                '_PYCCOLO_GUARD_',
+                                '_coverage_',
+                                '_pytest_',
+                                '_mock_',
+                                '_memory_',
+                                '_line_'
+                            ]))
+            
+            # Clean co_freevars (closure variables)
+            clean_freevars = tuple(name for name in original_code.co_freevars 
+                                if name not in ['self', 'cls'])  # Keep common ones
+            
+            # Clean co_cellvars (cell variables)
+            clean_cellvars = original_code.co_cellvars  # Usually safe to keep
+            
+            # Create new code object
+            clean_code = types.CodeType(
+                original_code.co_argcount,
+                original_code.co_posonlyargcount,
+                original_code.co_kwonlyargcount,
+                original_code.co_nlocals,
+                original_code.co_stacksize,
+                original_code.co_flags,
+                original_code.co_code,
+                original_code.co_consts,
+                clean_names,
+                original_code.co_varnames,
+                original_code.co_filename,
+                original_code.co_name,
+                original_code.co_firstlineno,
+                original_code.co_lnotab,
+                clean_freevars,
+                clean_cellvars
+            )
+            
+            func_copy.__code__ = clean_code
+            
+            # Also clean default arguments if they exist
+            if func.__defaults__:
+                # You might need to handle default arguments separately
+                pass
+            
+            return func_copy
+        
+        except Exception as e:
+            # print(f"Error cleaning function {func.__name__}: {e}")
+            return func
+    
+    def dump2(self, ip):
+        
+        """
+        Dumps the current state of the kernel's user namespace to a file.
+        Exclude built-in functions and objects that cannot be serialized.
+
+        """
+
+        # print("Dumping namespace")
+        to_persist = {}
+        
+        exclusion_list = ["print", "display", "fake_edge_sym", "ipyflow", "flow", "aliases", "_", "exit", "quit", "get_ipython"]
+        for k, obj in ip.user_ns.items():
+            if k in exclusion_list or k.startswith("_"):
+                continue
+            # to_persist[k] = {'o'}
+            if callable(obj):
+                obj = self.clean_function_object_robust(obj)
+            to_persist[k] = {'obj': obj, 'code': None, 'deps': None}
+            # try:
+            #     # if self.can_dill_serialize(self.shell.user_ns[k]):
+            #         # if callable(obj):
+            #         #     obj = self.clean_function_object_robust(obj)
+            #     # to_persist[k] = {'obj': obj, 'code': code( self.getSym(id(self.shell.user_ns[k]), k) ), 'deps': self.get_deps( self.getSym(id(self.shell.user_ns[k]), k) )}
+            # except Exception :
+            #     pass
+            # if not self.can_dill_serialize(v):
+            #     continue
+        with open(f'{os.getcwd()}/checkpoint_{self.last_cid}.pkl', 'wb') as dill_file: 
+            dill.dump(to_persist, dill_file)
+       
+        
+
+
     def dump1(self, ip):
         # to_persist = {}
         # self.total_vars.update({k for k in ip.variable_tracker.potential_accessed if k in ip.user_ns})
@@ -405,6 +588,7 @@ class CustomKernel(IPyflowKernel):
 
         exclusion_list = ["print", "display", "fake_edge_sym", "ipyflow", "flow", "aliases", "_"]
         globals_accessed = {k for k in ip.variable_tracker.potential_accessed if k in ip.user_ns}
+        # print(globals_accessed)
         
         to_persist = {}
         co_variables = []  # List of sets, where each set contains connected variables
@@ -455,9 +639,15 @@ class CustomKernel(IPyflowKernel):
                 ## persist co_variable
                 for var in co_var:
                     obj = None
-                    if self.can_dill_serialize(self.shell.user_ns[var]):
-                        obj = self.shell.user_ns[var]
-                    to_persist[var] = {'obj': obj, 'code': code( self.getSym(id(self.shell.user_ns[var]), var) ), 'deps': self.get_deps( self.getSym(id(self.shell.user_ns[var]), var) )}
+                    
+                    try:
+                        if self.can_dill_serialize(self.shell.user_ns[var]):
+                            obj = self.shell.user_ns[var]
+                            if callable(obj):
+                                obj = self.clean_function_object_robust(obj)
+                        to_persist[var] = {'obj': obj, 'code': code( self.getSym(id(self.shell.user_ns[var]), var) ), 'deps': self.get_deps( self.getSym(id(self.shell.user_ns[var]), var) )}
+                    except Exception :
+                        pass
 
         with open(f'{os.getcwd()}/checkpoint_{self.last_cid}.pkl', 'wb') as dill_file: 
             dill.dump(to_persist, dill_file)
@@ -775,6 +965,7 @@ class CustomKernel(IPyflowKernel):
                 cell_code = cell.get('source')
                 # print(''.join(cell_code).replace("\n", ""), code.replace("\n", ""))
                 if ''.join(cell_code).replace("\n", "") == code.replace("\n", ""):
+                    return cell.get('outputs', [])
                     outputs = cell.get('outputs', [])
                     if not outputs:
                         return [{'type': 'text', 'text': ""}]
@@ -898,12 +1089,17 @@ class CustomKernel(IPyflowKernel):
     
         # check if notebook metadata says to audit it.
         if not self.nb_initialized:
+            
+            import_encodings = "import encodings.cp437\nimport encodings.iso8859_1\nimport encodings.utf_16\nimport codecs\ncodecs.lookup('cp437')\n"
+            code = import_encodings + code
+            
             def post_run_hook(_):
                 with open(notebook, 'r', encoding='utf-8') as f:
                     # Capture system call for sciunit to move notebook in sandbox
                     f.read(1)
                 
             # You can access result.info.raw_cell, result.result, etc.
+            post_run_hook(None)
             ip.events.register("post_run_cell", post_run_hook)
             # from IPython.display import Javascript
             # from IPython.core.displaypub import publish_display_data
@@ -932,7 +1128,7 @@ class CustomKernel(IPyflowKernel):
 
         # print(type(ip), type(ip.user_ns))
         self.pre_run_cell(ip, code)
-
+        
         # # start_time = time.time()
 
         # # checkpoint_pattern = r"^# commit"
@@ -1030,6 +1226,8 @@ class CustomKernel(IPyflowKernel):
         # if self.audit:
         if code.strip().startswith('%') or code.strip().startswith('%%'):
             # If the code is a magic command, execute it directly
+            import_encodings = "import encodings.cp437\nimport encodings.iso8859_1\nimport encodings.utf_16\nimport codecs\ncodecs.lookup('cp437')\n"
+            code = import_encodings + code
             res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
             self.post_run_cell(ip)
             return res
@@ -1043,12 +1241,13 @@ class CustomKernel(IPyflowKernel):
             res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
             if not c_id:
                 self.persist_metadata(notebook_path, code)
-                self.dump1(ip)
+                self.dump2(ip)
                 self.run_commit_command(f'{notebook_path}/vv', self.last_cid, f'{notebook_path}/checkpoint_{self.last_cid}.pkl')
+                self.post_run_cell(ip)
             return res
         else:
             if c_id:
-                # print("restoring")
+                print("restoring")
                 self.load_memoized_cell(notebook_path, c_id)
                 # if not silent:
                 #     try:
@@ -1060,17 +1259,55 @@ class CustomKernel(IPyflowKernel):
                 #         pass
 
                 outputs = self.get_cell_outputs_by_execution_count(notebook, code)
-                output_text = []
-                for output in outputs:
-                    output_text.append(output['text'])
-                output_text = '\n'.join(output_text) or ""
+                def normalize_output_data(data):
+                    normalized = {}
+                    for mime, val in data.items():
+                        if isinstance(val, list):
+                            normalized[mime] = ''.join(val)
+                        else:
+                            normalized[mime] = val
+                    return normalized
                 
-                self.shell.execution_count += 1
-                self.send_response(self.iopub_socket, 'execute_result', {
-                    'execution_count': self.shell.execution_count,
-                    'data': {'text/plain': output_text},
-                    'metadata': {}
-                })
+                for output in outputs:
+                    output_type = output.get('output_type')
+
+                    if output_type == 'stream':
+                        self.send_response(self.iopub_socket, 'stream', {
+                            'name': output.get('name', 'stdout'),
+                            'text': ''.join(output.get('text', []))
+                        })
+
+                    elif output_type == 'execute_result':
+                        self.send_response(self.iopub_socket, 'execute_result', {
+                            'execution_count': self.shell.execution_count,
+                            'data': normalize_output_data(output.get('data', {})),
+                            'metadata': output.get('metadata', {})
+                        })
+
+                    elif output_type == 'display_data':
+                        self.send_response(self.iopub_socket, 'display_data', {
+                            'data': normalize_output_data(output.get('data', {})),
+                            'metadata': output.get('metadata', {})
+                        })
+
+                    elif output_type == 'error':
+                        self.send_response(self.iopub_socket, 'error', {
+                            'ename': output.get('ename', ''),
+                            'evalue': output.get('evalue', ''),
+                            'traceback': output.get('traceback', [])
+                        })
+                
+                # output_text = []
+                # for output in outputs:
+                #     output_text.append(output['text'])
+                # output_text = '\n'.join(output_text) or ""
+                
+                # self.shell.execution_count += 1
+                # self.send_response(self.iopub_socket, 'execute_result', {
+                #     'execution_count': self.shell.execution_count,
+                #     'data': {'text/plain': output_text},
+                #     'metadata': {}
+                # })
 
                 self.post_run_cell(ip)
                 self.last_cid = c_id
@@ -1080,11 +1317,10 @@ class CustomKernel(IPyflowKernel):
                     "execution_count": self.shell.execution_count,
                     "payload": [],
                     "user_expressions": {},
-                }
-                
+                }                
 
-                self.post_run_cell(ip)
-                self.last_cid = c_id
+                # self.post_run_cell(ip)
+                # self.last_cid = c_id
                 # return {
                 #     "status": "ok",
                 #     "execution_count": self.shell.execution_count,
@@ -1094,8 +1330,9 @@ class CustomKernel(IPyflowKernel):
             else:
                 # "just executing"
                 res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
-                return res       
-        
+                self.post_run_cell(ip)
+                return res
+    
         # c_id = MetadataHandler(notebook_path).get_checkpoint(code, self.last_cid)
         # if c_id and not self.audit:
         #     self.load_memoized_cell(notebook_path, c_id)

@@ -1015,71 +1015,6 @@ class CustomKernel(IPyflowKernel):
         notebook = self.shell.user_ns.get("__session__", None)
         notebook_path = "/".join(notebook.split("/")[:-1])
         
-        # def analyze_algorithm():
-        #     # Initial setup
-        #     co_variables = []  # List of sets, where each set contains connected variables
-            
-        #     # Go through all memory locations
-        #     for obj_id, entrySet in flow().aliases.items():
-        #         # Create set of variables for current memory location
-        #         varSet = set()
-        #         for entry in entrySet:
-        #             if (entry.readable_name.startswith("<literal_sym_") or 
-        #                 "__ipyflow_mutation" in entry.readable_name or
-        #                 entry.is_module or entry.is_anonymous):
-        #                 continue
-                        
-        #             var = entry.full_path[1]
-        #             if var and var not in ["print", "display", "fake_edge_sym", "ipyflow", "flow", "aliases", "_"]:
-        #                 varSet.add(var)
-                
-        #         # If no valid variables found, skip
-        #         if not varSet:
-        #             continue
-                    
-        #         new_co_variables = []
-        #         merged_set = varSet
-        #         # print("varSet", merged_set)
-        #         for s in co_variables:
-        #             if len(s & merged_set) == 0:
-        #                 ## this is not affected, add this to the result
-        #                 new_co_variables.append(s)
-        #                 # print("not merging", merged_set, s)
-        #             else:
-        #                 # print("merging", merged_set, s)
-        #                 # print("merging", merged_set, s)
-        #                 merged_set |= s
-        #                 # print("merged", merged_set)
-        #         new_co_variables.append(merged_set)
-        #         co_variables = new_co_variables
-        #         # print("co_vars", co_variables)
-                
-        #         # merged_indices = set()
-        #         # for var in varSet:
-        #         #     for i, s in enumerate(co_variables):
-        #         #         if var in s:
-        #         #             merged_indices.add(i)
-
-        #         #             # sets_to_merge.append(s)  # Store the actual set, not the index
-                
-        #         # # print(sets_to_merge)
-        #         # if sets_to_merge:
-        #         #     # Merge all sets that contain any variable from varSet
-        #         #     merged_set = varSet.union(*sets_to_merge)
-        #         #     print("sets_to_merge", sets_to_merge)
-        #         #     # Remove old sets
-        #         #     for s in sets_to_merge:
-        #         #         print("removing", s, co_variables)
-        #         #         co_variables.remove(s)
-        #         #     # Add merged set
-        #         #     co_variables.append(merged_set)
-        #         # else:
-        #         #     # If no merging happened, add varSet as new set
-        #         #     co_variables.append(varSet)
-            
-        #     print("co_vars", co_variables)
-        #     return co_variables
-                    
         
         # self.pre_run_cell(ip, code)
         # res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
@@ -1113,16 +1048,16 @@ class CustomKernel(IPyflowKernel):
             # enable_autosave_from_kernel()
             # Load notebook
             nb = None
-            # with open(notebook, 'r', encoding='utf-8') as f:
-            #     nb = nbformat.read(f, as_version=4)
-            #     # set to audit mode
-            #     if nb.metadata['AUDIT'] == "true":
-            #         self.audit = True
+            with open(notebook, 'r', encoding='utf-8') as f:
+                nb = nbformat.read(f, as_version=4)
+                # set to audit mode
+                if nb.metadata['AUDIT'] == "true":
+                    self.audit = True
 
-            # if self.audit:
-            #     with open(notebook, 'w', encoding='utf-8') as f:
-            #         nb.metadata['AUDIT'] = "false"
-            #         nbformat.write(nb, f)                    
+            if self.audit:
+                with open(notebook, 'w', encoding='utf-8') as f:
+                    nb.metadata['AUDIT'] = "false"
+                    nbformat.write(nb, f)                    
           
             self.nb_initialized = True
 

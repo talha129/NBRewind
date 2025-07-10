@@ -1,7 +1,7 @@
 {
     "argv": [
         "python",
-        "/home/admin/Talha/nbrewind/nbrewind.py",
+        "{nbrewind_path}",
         "-f",
         "{connection_file}"
     ],

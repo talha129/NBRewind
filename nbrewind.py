@@ -6,6 +6,8 @@ from ipyflow import code as ipyflow_code
 import re
 import dill
 import time
+import json
+import ast
 
 from ipyflow.kernel import IPyflowKernel
 from IPython import get_ipython
@@ -20,8 +22,7 @@ from ipyflow import code
 from ipyflow import deps
 
 import subprocess
-
-initalized = False
+from IPython.core.interactiveshell import InteractiveShell
 
 
 class NamedObject:
@@ -30,26 +31,106 @@ class NamedObject:
         self.obj = obj_ref
         self.code = code_dep
 
+import traceback
+import builtins
+
+from metadata_handler import MetadataHandler
+
+
+class VariableTracker(ast.NodeVisitor):
+    def __init__(self):
+        self.potential_accessed = set()
+        self.potential_changed = set()
+        self.global_vars = set()
+
+    def visit_Name(self, node):
+        self.potential_accessed.add(node.id)
+        if isinstance(node.ctx, ast.Load):
+            self.potential_accessed.add(node.id)
+        elif isinstance(node.ctx, ast.Store):
+            self.potential_accessed.add(node.id)
+        # print(node.id)
+        self.generic_visit(node)
+
+    def visit_Import(self, node):
+        # print(node.names)
+        for alias in node.names:
+            # print(alias.asname or alias.name)
+            self.potential_accessed.add(alias.asname or alias.name)
+            # self.global_vars.add(alias.asname or alias.name)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node):
+       
+        for alias in node.names:
+            # print(alias.asname or alias.name)
+            self.potential_accessed.add(alias.asname or alias.name)
+            # self.global_vars.add(alias.asname or alias.name)
+        self.generic_visit(node)
+
+
+
 class TrackedNamespace(dict):
     """Dict subclass to track variable accesses during cell execution"""
-    def __init__(self, *args, **kwargs):
+    def __init__(self, original_ns, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.original_ns = original_ns  # Reference to ip.user_ns
         self.accessed = set()
         self.changed = set()
 
     def __getitem__(self, key):
-        if key == 'print':
-            return print
-        self.accessed.add(key)
-        return super().__getitem__(key)
+        print(f"[TrackedNamespace] Accessing key: {key}")
+        print(f"[TrackedNamespace] Current keys: {list(self.keys())}")
+        if key in self:
+            self.accessed.add(key)
+            return super().__getitem__(key)
+        if key in self.original_ns:
+            print(f"[TrackedNamespace] Found '{key}' in original namespace")
+            self.accessed.add(key)
+            return self.original_ns[key]
+        if hasattr(builtins, key):
+            print(f"[TrackedNamespace] Found '{key}' in builtins")
+            self.accessed.add(key)
+            return getattr(builtins, key)
+        print(f"[TrackedNamespace] Key '{key}' not found")
+        traceback.print_stack()
+        raise KeyError(f"Variable '{key}' not defined")
 
     def __setitem__(self, key, value):
         self.accessed.add(key)
+        self.changed.add(key)
         super().__setitem__(key, value)
+        self.original_ns[key] = value  # Sync with original namespace
+
+    def update(self, *args, **kwargs):
+        super().update(*args, **kwargs)
+        self.original_ns.update(*args, **kwargs)  # Keep original_ns in sync
+
+    # def __getitem__(self, key):
+        
+        # print(f"[TrackedNamespace] Accessing key: {key}")
+        # print(f"[TrackedNamespace] Current keys: {list(self.keys())}")
+        # if key not in self:
+        #     print(f"[TrackedNamespace] Key '{key}' not found")
+        #     print("Stack trace:")
+        #     traceback.print_stack()
+        #     raise KeyError(f"Variable '{key}' not defined")
+        # self.accessed.add(key)
+        # return super().__getitem__(key)
+        
+        # if key == 'print':
+    #         return print
+    #     self.accessed.add(key)
+    #     return super().__getitem__(key)
+
+    # def __setitem__(self, key, value):
+    #     self.accessed.add(key)
+    #     super().__setitem__(key, value)
 
     # def __delitem__(self, key):
     #     # self.deleted.add(key)
     #     super().__delitem__(key)
+
 
 def patch_namespace(ip):
     """Main patching function to install hooks"""
@@ -97,10 +178,32 @@ class CustomKernel(IPyflowKernel):
         
         # Activate the patching when imported
         # self.initalized = False
+        self.average_checkpoint_time = 0
+        # self.times = []
+        # self.checkpnt_times = []
+        self.nb_initialized = False
+        self.diverged = False
+        if not os.path.exists(f'{os.getcwd()}/session'):
+            os.mkdir(f'{os.getcwd()}/session')
         super().__init__(**kwargs)
+        # shell = InteractiveShell.instance()
+        # shell.run_line_magic("flow", "mode", "normal")
+        # self.configure_ipyflow_tracer()
         # patch_namespace(self.shell)
         
         # myshell = IPyflowInteractiveShell.
+
+    # def configure_ipyflow_tracer(self):
+    #     """Patch ipyflow's tracer to use TrackedNamespace"""
+    #     from ipyflow.tracing.ipyflow_tracer import IPyflowTracer
+    #     original_trace = IPyflowTracer.trace
+
+    #     def patched_trace(self, frame, event, arg):
+    #         if hasattr(self.shell, 'tracked_ns'):
+    #             frame.f_globals = self.shell.tracked_ns
+    #         return original_trace(self, frame, event, arg)
+
+    #     IPyflowTracer.trace = patched_trace
 
     def dump_namespace(self, ):
         to_dump = {}
@@ -118,24 +221,68 @@ class CustomKernel(IPyflowKernel):
             # dill.dump_module(dill_file, self.shell)
             dill.dump(to_dump, dill_file)
 
-    def pre_run_cell(self, ip):
-        """Hook executed before each cell runs"""
-        ip.tracked_ns = TrackedNamespace(ip.user_ns)
-        ip.user_ns = ip.tracked_ns  # Replace with tracked namespace
+    # def pre_run_cell(self, ip):
+    #     """Hook executed before each cell runs"""
+        
+    #     ip.tracked_ns = TrackedNamespace(ip.user_ns)
+    #     ip.user_ns = ip.tracked_ns  # Replace with tracked namespace
+        
+    # def post_run_cell(self, ip):
+    #     """Hook executed after each cell completes"""
+    #     if hasattr(ip, 'tracked_ns'):
+    #         # Get accessed variables and process them
+    #         accessed_vars = ip.tracked_ns.accessed
+    #         # print(f"[Kishu] Accessed variables: {accessed_vars}")
+
+    #         # changed = ip.tracked_ns.changed
+    #         # print(f"[Kishu] Changed variables: {changed}")
+            
+    #         # Restore original namespace (convert back to dict)
+    #         ip.user_ns = dict(ip.tracked_ns)
+    #         del ip.tracked_ns
+
+    def pre_run_cell(self, ip, code):
+        ip.variable_tracker = VariableTracker()
+        # Snapshot initial globals
+        # ip.variable_tracker.before_globals = {
+        #     k: id(ip.user_ns[k]) for k in ip.user_ns if not k.startswith('_')
+        # }
+        # Analyze code statically
+        try:
+            tree = ast.parse(code)
+            ip.variable_tracker.visit(tree)
+            # print(ip.variable_tracker.÷potential_accessed)
+        except SyntaxError:
+            pass
 
     def post_run_cell(self, ip):
-        """Hook executed after each cell completes"""
-        if hasattr(ip, 'tracked_ns'):
-            # Get accessed variables and process them
-            accessed_vars = ip.tracked_ns.accessed
-            # print(f"[Kishu] Accessed variables: {accessed_vars}")
-
-            # changed = ip.tracked_ns.changed
-            # print(f"[Kishu] Changed variables: {changed}")
-            
-            # Restore original namespace (convert back to dict)
-            ip.user_ns = dict(ip.tracked_ns)
-            del ip.tracked_ns
+        # print(ip.variable_tracker.potential_accessed)
+        if hasattr(ip, 'variable_tracker'):
+            # # Get changed variables via namespace comparison
+            # # after_globals = {k for k in ip.user_ns if not k.startswith('_')}
+            # # before_globals = set(ip.variable_tracker.before_globals.keys())
+            # # changed = after_globals - before_globals 
+            # # # Include variables modified in global scope or declared global
+            # # changed.update(
+            # #     v for v in ip.variable_tracker.potential_changed
+            # #     if v in ip.user_ns and (v in ip.variable_tracker.global_vars or v in ip.user_ns)
+            # # )
+            # # # Get accessed variables from ipyflow's aliases and AST
+            # # accessed = set()
+            # # for mem in flow().aliases:
+            # #     for var in flow().aliases[mem]:
+            # #         if var.readable_name in ip.user_ns or hasattr(builtins, var.readable_name):
+            # #             accessed.add(var.readable_name)
+            # # accessed.update(
+            # #     v for v in ip.variable_tracker.potential_accessed
+            # #     if v in ip.user_ns or hasattr(builtins, v)
+            # # )
+            # globals_accessed = {k for k in ip.variable_tracker.potential_accessed if k in ip.user_ns}
+            # print(f"[Kishu] Accessed variables: {globals_accessed}")
+            # # print(f"[Kishu] Changed variables: {changed}")
+            # # ip.variable_tracker.accessed = accessed
+            # # ip.variable_tracker.changed = changed
+            del ip.variable_tracker
 
     def getSym(self, id, name):
 
@@ -184,6 +331,7 @@ class CustomKernel(IPyflowKernel):
         return result
 
     def dump(self, ip):
+        globals_accessed = {k for k in ip.variable_tracker.potential_accessed if k in ip.user_ns}
         exclusion_list = ["print", "display", "fake_edge_sym", "ipyflow", "flow", "aliases", "_"]
         to_persist = {}
         # print(ip.tracked_ns.accessed)
@@ -193,6 +341,7 @@ class CustomKernel(IPyflowKernel):
             should_persist = False
             for entry in entrySet:
                 
+                var = None
                 if entry.readable_name.startswith("<literal_sym_"):
                     continue
                 if "__ipyflow_mutation" in entry.readable_name:
@@ -208,11 +357,15 @@ class CustomKernel(IPyflowKernel):
                 if var in exclusion_list:
                     continue
                
-                varSet.append(var)
-                if var in ip.tracked_ns.accessed: 
+                # print(entry.full_path)
+                if var:
+                    varSet.append(var)
+                if var in globals_accessed: 
                     should_persist = True
 
+                
             
+            # print(varSet, entrySet)
             for var in varSet:
                 if should_persist:
                     obj = None
@@ -230,7 +383,7 @@ class CustomKernel(IPyflowKernel):
         #         print(code( self.getSym(id(self.shell.user_ns[var]), var) ))
                     
                 
-        print("Persisted Variables: ", to_persist)
+        # print("Persisted Variables: ", to_persist.keys())
         with open(f'{os.getcwd()}/session/checkpoint_{self.shell.execution_count - 1}.pkl', 'wb') as dill_file: 
             # dill.dump_module(dill_file, self.shell)
             # print(to_persist)
@@ -244,17 +397,20 @@ class CustomKernel(IPyflowKernel):
         :param path_to_file: The path to the .pkl file
         """
         if not os.path.isfile(path_to_file):
-            raise FileNotFoundError(f"The file {path_to_file} does not exist.")
+            print(f"The file {path_to_file} does not exist.")
+            # raise FileNotFoundError(f"The file {path_to_file} does not exist.")
+            return
         
+                
         # Generate the command
         command = f"{path_to_binary} commit {exec_id} {path_to_file}"
         
         # Run the command
         try:
             result = subprocess.run(command, shell=True, check=True, text=True, capture_output=True)
-            print("Command executed successfully:")
+            # print("Command executed successfully:")
             os.remove(path_to_file)
-            print(result.stdout)
+            # print(result.stdout)
         except subprocess.CalledProcessError as e:
             print("Error while executing the command:")
             print(e.stderr)
@@ -281,14 +437,176 @@ class CustomKernel(IPyflowKernel):
             print("Checkout command executed successfully:")
             print(result.stdout)
         except subprocess.CalledProcessError as e:
-            print("Error while executing the checkout command:")
-            print(e.stderr)
+            # print("Error while executing the checkout command:")
+            # print(e.stderr)
+            pass
 
+    def persist_metadata(self, path, code, execution_count):
+        
+        ## Get hash of code 
+        ## Persist hash of code and execution counter in an sqlite database
+        try:
+            metadata_handler = MetadataHandler(path, code, execution_id=execution_count)
+            metadata_handler.persist_metadata()
+        except Exception as e:
+            print(f"Error persisting metadata: {e}")
+            traceback.print_exc()
+
+
+    
+    def load_memoized_cell(self, path, code, execution_count):
+        # gets execution id associated with the code
+        # load data from from the persisted session files till the execution id starting from 0
+        metadata_handler = MetadataHandler(path, code, execution_id=execution_count)
+        exec_id, c = metadata_handler.get_metadata_from_db(code, execution_id=execution_count)
+        same = str(c) == str(code) and str(exec_id) == str(execution_count)
+        
+        if same:
+            loaded_vars = {}
+            for f in range(1, int(exec_id ) + 1):
+                self.run_checkout_command(f'{path}/vv', f, f'{path}/session/checkpoint_{f}.pkl')
+                fname = f'{path}/session/checkpoint_{f}.pkl'
+                if os.path.isfile(fname):
+                    with open(fname, 'rb') as dill_file:
+                        loaded_vars.update(dill.load(dill_file))
+                    os.remove(fname)
+        
+            
+            
+            # update global namespace with loaded variables
+            for var in loaded_vars:
+                # loaded_vars[var] = loaded_vars[var]['obj']
+                self.shell.user_ns.update({var: loaded_vars[var]['obj']})
+
+            # Build dependency graph
+            deps_graph = {var: data['deps'] for var, data in loaded_vars.items() if data['obj'] is None}
+
+            # Get execution order using topological sort
+            execution_order = self.topological_sort(deps_graph)
+            # print(loaded_vars)
+
+            namespace = self.shell.user_ns
+
+            # self.shell.user_ns['A'] = None
+
+            # print(namespace['A'])
+            # Execute code for each variable in order, only if missing
+            for var_name in execution_order:
+                # Check if the variable exists and is not None in the namespace
+                # print(namespace['A'])
+                if var_name in namespace and namespace[var_name] is not None:
+                    continue  # Skip if the object already exists and is not None
+                
+                # print(loaded_vars[var_name])
+                code = str(loaded_vars[var_name]['code'])
+                # print(type(str(code)))
+                try:
+                    # Execute the code in the namespace
+                    # print("hello")
+                    exec(code, namespace)
+                    # If the variable isn't directly assigned, try to find it
+                    # if var_name not in namespace:
+                    #     for key, value in namespace.items():
+                    #         if hasattr(value, '__dict__') and var_name in value.__dict__:
+                    #             namespace[var_name] = value.__dict__[var_name]
+                    #             break
+                except Exception as e:
+                    print(f"Error restoring {var_name}: {str(e)}")
+                    continue
+                # print(f"Restored checkpoint {f}")                        
+                        
+                # else:
+                #     continue
+                #     print("No checkpoint found for the given ID")
+        
+            
+            # ip = get_ipython()
+            # res =  await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
+            
+            # accessed_vars = ip.tracked_ns.accessed
+        #     to_dump = {}
+        #     for v in accessed_vars:
+        #         to_dump[v] = self.shell.user_ns[v]
+
+        #     with open(f'{os.getcwd()}/session/checkpoint_{self.shell.execution_count - 1}.pkl', 'wb') as dill_file: 
+        #         # dill.dump_module(dill_file, self.shell)
+        #         # print(to_dump)
+        #         dill.dump(to_dump, dill_file)
+            
+        #     self.post_run_cell(ip)
+        #     return res
+
+        return same
+
+    def get_cell_outputs_by_execution_count(self, notebook_path, execution_count):
+        """Retrieve outputs for the cell with the specified execution_count."""
+        if not notebook_path or not os.path.exists(notebook_path):
+            return [{'type': 'error', 'text': f"Notebook not found at {notebook_path}"}]
+        
+        try:
+            with open(notebook_path, 'r', encoding='utf-8') as f:
+                notebook = json.load(f)
+            cells = notebook.get('cells', [])
+            
+            # Find cell with matching execution_count
+            for cell in cells:
+                if cell.get('cell_type') != 'code':
+                    continue
+                cell_execution_count = cell.get('execution_count')
+                if cell_execution_count == execution_count:
+                    outputs = cell.get('outputs', [])
+                    if not outputs:
+                        return [{'type': 'text', 'text': ""}]
+                    
+                    result = []
+                    for output in outputs:
+                        if output.get('output_type') == 'stream':
+                            result.append({
+                                'type': 'stream',
+                                'name': output.get('name', 'stdout'),
+                                'text': ''.join(output.get('text', []))
+                            })
+                        elif output.get('output_type') in ['execute_result', 'display_data']:
+                            data = output.get('data', {})
+                            if 'text/plain' in data:
+                                result.append({
+                                    'type': 'text',
+                                    'text': ''.join(data['text/plain'])
+                                })
+                            elif 'image/png' in data:
+                                result.append({
+                                    'type': 'image',
+                                    'text': 'Image output (PNG)'
+                                })
+                            else:
+                                result.append({
+                                    'type': 'text',
+                                    'text': str(data)  # Fallback for other data types
+                                })
+                        elif output.get('output_type') == 'error':
+                            result.append({
+                                'type': 'error',
+                                'text': f"{output.get('ename', '')}: {output.get('execution_count', '')}"
+                            })
+                    return result
+            return [{'type': 'error', 'text': f"No cell found with execution_count {execution_count}"}]
+        except Exception as e:
+            return [{'type': 'error', 'text': f"Error reading notebook: {str(e)}"}]
+        
+        
     async def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False, *
                         ,cell_meta=None, cell_id=None,):
 
+        
+        
+        start = time.time()
         ip = self.shell
-        self.pre_run_cell(ip)
+        #path to notebook directory
+        notebook = self.shell.user_ns.get("__session__", None)
+        notebook_path = "/".join(notebook.split("/")[:-1])
+        
+        # print(type(ip), type(ip.user_ns))
+        self.pre_run_cell(ip, code)
 
         # # start_time = time.time()
 
@@ -309,19 +627,20 @@ class CustomKernel(IPyflowKernel):
                     with open(fname, 'rb') as dill_file:
                         loaded_vars.update(dill.load(dill_file))
                     os.remove(fname)
-                        
-            # Build dependency graph
-            deps_graph = {var: data['deps'] for var, data in loaded_vars.items()}
-
-            # Get execution order using topological sort
-            execution_order = self.topological_sort(deps_graph)
-            print(loaded_vars)
+        
             
             
             # update global namespace with loaded variables
             for var in loaded_vars:
                 # loaded_vars[var] = loaded_vars[var]['obj']
                 self.shell.user_ns.update({var: loaded_vars[var]['obj']})
+
+            # Build dependency graph
+            deps_graph = {var: data['deps'] for var, data in loaded_vars.items() if data['obj'] is None}
+
+            # Get execution order using topological sort
+            execution_order = self.topological_sort(deps_graph)
+            # print(loaded_vars)
 
             namespace = self.shell.user_ns
 
@@ -383,9 +702,66 @@ class CustomKernel(IPyflowKernel):
         # #     self.initalized = True
         # #     patch_namespace(self.shell)
         
-        
+        if not self.nb_initialized:
+            self.shell.run_line_magic("flow", "mode normal")
+            # exec("%flow mode normal", self.shell.user_ns)
+            self.nb_initialized = True
+                
+        # print(cell_meta)
+        if not self.diverged:
+            # if code ran did change compared to persisted metadata set diverged to True
+            # print(self.shell.execution_count)
+            same = self.load_memoized_cell(notebook_path, code, self.shell.execution_count)
+            if same:
+                print("hello")
+                # cell_meta["skip_execution"] = True
+                # print(res["payload"])
+                # res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin, cell_meta=cell_meta, cell_id=cell_id)
+                # res = await super().do_execute(code, True, False, {}, allow_stdin, cell_meta=cell_meta, cell_id=cell_id)
+                # print(res["payload"])
+                # return
+                
+                outputs = self.get_cell_outputs_by_execution_count(notebook, self.shell.execution_count)
+                output_text = []
+                for output in outputs:
+                    # if output['type'] == 'error':
+                    #     output_text.append(f"Error: {output['text']}")
+                    # elif output['type'] == 'stream':
+                    #     output_text.append(f"{output['name']}: {output['text']}")
+                    # else:
+                    output_text.append(output['text'])
+                output_text = '\n'.join(output_text) or ""
+                # print(output_text)
+                
+                self.shell.execution_count += 1
+                self.send_response(self.iopub_socket, 'execute_result', {
+                    'execution_count': self.execution_count - 1,
+                    'data': {'text/plain': output_text},
+                    'metadata': {}
+                })
+
+                # res["execution_count"] = self.shell.execution_count - 1
+                # return res
+                # self.shell.displayhook.disable()
+                # self.shell.display_pub.publish = lambda *args, **kwargs: None
+                # # return res
+                # self.diverged = not same
+                # self.shell.execution_count += 1
+                # /Users/talhaazaz/Documents/DePaul/Research/NBRewind/CIKM_NB_v2.ipynb
+                
+                
+                return {
+                    "status": "ok",
+                    "execution_count": self.shell.execution_count - 1,
+                    "payload": [],
+                    "user_expressions": {},
+                }
+            # from IPython.core.interactiveshell import DisplayHook
+            # self.shell.displayhook = DisplayHook(self.shell)
+            self.diverged = not same
+
+        print("executing")
         res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
-        # end_time = time.time() 
         
         # # if end_time - start_time > Threshold and res["status"] == "ok":
         # #     self.dump_namespace()
@@ -434,10 +810,23 @@ class CustomKernel(IPyflowKernel):
         #     # dill.dump_module(dill_file, self.shell)
         #     dill.dump(to_persist, dill_file)
         
-        self.dump(ip)
-        self.run_commit_command(f'{os.getcwd()}/session/vv', self.shell.execution_count - 1, f'{os.getcwd()}/session/checkpoint_{self.shell.execution_count - 1}.pkl')
-        self.post_run_cell(ip) 
+        print("persisting metadata")
         
+        self.persist_metadata(notebook_path, code, self.shell.execution_count - 1)
+        self.dump(ip)
+        print(os.getcwd())
+        self.run_commit_command(f'{notebook_path}/vv', self.shell.execution_count - 1, f'{notebook_path}/session/checkpoint_{self.shell.execution_count - 1}.pkl')
+        self.post_run_cell(ip) 
+        # end = time.time()
+
+        # self.average_checkpoint_time = (self.average_checkpoint_time + (end - start)) / 2
+        # self.checkpnt_times.append(end - start)
+        # print(f"Checkpoint time: {end - start}")
+        # print(f"Average checkpoint time: {self.average_checkpoint_time}")
+        # self.times.append(end - start)
+        # print("times: ", self.times)    
+        # print("checkpnt_times: ", self.checkpnt_times)
+
         return res
 
 

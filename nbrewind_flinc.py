@@ -237,22 +237,25 @@ class NbRewindMagics(Magics):
         notebook = self.kernel.shell.user_ns.get("__session__", None)
         path = "/".join(notebook.split("/")[:-1])
         
-        loaded_vars = {}
-        # for f in range(1, int(exec_id ) + 1):
-        self.kernel.run_checkout_command(f'{path}/vv', c_id, f'{path}/checkpoint_{c_id}.pkl')
-        fname = f'{path}/checkpoint_{c_id}.pkl'
-        if os.path.isfile(fname):
-            with open(fname, 'rb') as dill_file:
-                loaded_vars.update(dill.load(dill_file))
-            # os.remove(fname)
+        self.kernel.load_memoized_cell(path, c_id)
+
+        # loaded_vars = {}
+        # # for f in range(1, int(exec_id ) + 1):
+        # self.kernel.run_checkout_command(f'{path}/vv', c_id, f'{path}/checkpoint_{c_id}.pkl')
+        # fname = f'{path}/checkpoint_{c_id}.pkl'
+        # if os.path.isfile(fname):
+        #     with open(fname, 'rb') as dill_file:
+        #         loaded_vars.update(dill.load(dill_file))
+        #     # os.remove(fname)
 
     
         
-        # update global namespace with loaded variables
-        for var in loaded_vars:
-            # loaded_vars[var] = loaded_vars[var]['obj']
-            # print(loaded_vars['x']['obj'])
-            self.kernel.shell.user_ns.update({var: loaded_vars[var]['obj']})
+        # # update global namespace with loaded variables
+        # for var in loaded_vars:
+        #     # loaded_vars[var] = loaded_vars[var]['obj']
+        #     # print(loaded_vars['x']['obj'])
+            
+        #     self.kernel.shell.user_ns.update({var: loaded_vars[var]['obj']})
 
         self.kernel.last_cid = c_id
 
@@ -440,11 +443,12 @@ class CustomKernel(IPyflowKernel):
     
     def can_dill_serialize(self, obj):
         try:
-            # Attempt to serialize the object
-            dill.dumps(obj)
+            # Attempt round-trip: serialize then deserialize
+            serialized = dill.dumps(obj)
+            dill.loads(serialized)
             return True
         except Exception as e:
-            print(f"Cannot serialize object: {e}")
+            print(f"Cannot serialize/deserialize object (type: {type(obj).__name__}): {e}")
             return False
 
     def get_deps(self, sym):
@@ -453,7 +457,7 @@ class CustomKernel(IPyflowKernel):
         to_ret = []
         for dep in lst:
             to_ret.append(dep.full_path[1])
-        return to_ret
+        return list(set(to_ret))
     
     def topological_sort(self, deps_graph):
         """Perform a topological sort on the dependency graph."""
@@ -551,9 +555,25 @@ class CustomKernel(IPyflowKernel):
             if k in exclusion_list or k.startswith("_"):
                 continue
             # to_persist[k] = {'o'}
-            if callable(obj):
-                obj = self.clean_function_object_robust(obj)
-            to_persist[k] = {'obj': obj, 'code': None, 'deps': None}
+            
+            try:
+                deps = []
+                if self.can_dill_serialize(self.shell.user_ns[k]):
+                    obj = self.shell.user_ns[k]
+                    if callable(obj):
+                        obj = self.clean_function_object_robust(obj)
+                else:
+                    obj = None
+                    deps = self.get_deps( self.getSym(id(self.shell.user_ns[k]), k))                           
+                # print(k, obj)
+                to_persist[k] = {'obj': obj, 'code': code( self.getSym(id(self.shell.user_ns[k]), k) ), 'deps': deps}
+                # print(to_persist)
+            except Exception as e:
+                # print(e)
+                pass
+            # if callable(obj):
+            #     obj = self.clean_function_object_robust(obj)
+            # to_persist[k] = {'obj': obj, 'code': None, 'deps': None}
             # try:
             #     # if self.can_dill_serialize(self.shell.user_ns[k]):
             #         # if callable(obj):
@@ -563,6 +583,7 @@ class CustomKernel(IPyflowKernel):
             #     pass
             # if not self.can_dill_serialize(v):
             #     continue
+        # print(to_persist)
         with open(f'{os.getcwd()}/checkpoint_{self.last_cid}.pkl', 'wb') as dill_file: 
             dill.dump(to_persist, dill_file)
        
@@ -594,23 +615,46 @@ class CustomKernel(IPyflowKernel):
         co_variables = []  # List of sets, where each set contains connected variables
         
         # Go through all memory locations
+        entries_to_process = []
         for _, entrySet in flow().aliases.items():
+            entries_to_process.append(entrySet)
+        # for _, entrySet in flow().aliases.items():
+        old_limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(50)  # Very low limit
+        # readable_name = entry.readable_name
+        
+        for entrySet in entries_to_process:
             # Create set of variables for current memory location
             varSet = set()
             for entry in entrySet:
-                if entry.readable_name.startswith("<literal_sym_"):
-                            continue
-                if "__ipyflow_mutation" in entry.readable_name:
-                    continue
-                
-                if not entry.is_module and not entry.is_anonymous:
-                    var = entry.full_path[1]
-
-                    if var in exclusion_list:
+                try:
+                    # print(f"Processing entry: {entry}")
+                    if hasattr(entry, 'full_path') and len(entry.full_path) <= 1:
                         continue
 
-                    if var:
-                        varSet.add(var)
+                    if entry.readable_name.startswith("<literal_sym_"):
+                                continue
+                    if "__ipyflow_mutation" in entry.readable_name:
+                        continue
+                    
+                    if not entry.is_module and not entry.is_anonymous:
+                        var = entry.full_path[1]
+
+                        if var in exclusion_list:
+                            continue
+
+                        if var:
+                            varSet.add(var)
+                except RecursionError as e:
+                    pass
+                    # print(f"RecursionError for entry ID: {id(entry)}")
+                    # safe_attrs = ['is_module', 'is_anonymous']
+                    # for attr in safe_attrs:
+                    #     if hasattr(entry, attr):
+                    #         try:
+                    #             print(f"{attr}: {getattr(entry, attr)}")
+                    #         except:
+                    #             print(f"Cannot access {attr}")
             
             # If no valid variables found, skip
             if not varSet:
@@ -628,7 +672,7 @@ class CustomKernel(IPyflowKernel):
                     # print("merged", merged_set)
             new_co_variables.append(merged_set)
             co_variables = new_co_variables
-
+        sys.setrecursionlimit(old_limit)
         
         ## go over globals and persist only co_variables that were affected
         for g in globals_accessed:
@@ -639,13 +683,16 @@ class CustomKernel(IPyflowKernel):
                 ## persist co_variable
                 for var in co_var:
                     obj = None
-                    
+                    deps = []
                     try:
                         if self.can_dill_serialize(self.shell.user_ns[var]):
                             obj = self.shell.user_ns[var]
                             if callable(obj):
                                 obj = self.clean_function_object_robust(obj)
-                        to_persist[var] = {'obj': obj, 'code': code( self.getSym(id(self.shell.user_ns[var]), var) ), 'deps': self.get_deps( self.getSym(id(self.shell.user_ns[var]), var) )}
+                        else:
+                            deps = self.get_deps( self.getSym(id(self.shell.user_ns[var]), var))                           
+                        # print(var, obj)
+                        to_persist[var] = {'obj': obj, 'code': code( self.getSym(id(self.shell.user_ns[var]), var) ), 'deps': deps}
                     except Exception :
                         pass
 
@@ -856,31 +903,35 @@ class CustomKernel(IPyflowKernel):
         fname = f'{path}/checkpoint_{c_id}.pkl'
         if os.path.isfile(fname):
             with open(fname, 'rb') as dill_file:
-                loaded_vars.update(dill.load(dill_file))
+                x = dill.load(dill_file)
+                # print(x)
+                loaded_vars.update(x)
             # os.remove(fname)
 
     
         
         # update global namespace with loaded variables
+        # print(loaded_vars)
         for var in loaded_vars:
             # loaded_vars[var] = loaded_vars[var]['obj']
-            # print(loaded_vars['x']['obj'])
+            # print(loaded_vars[var]['obj'])
             self.shell.user_ns.update({var: loaded_vars[var]['obj']})
 
         # Build dependency graph
         deps_graph = {var: data['deps'] for var, data in loaded_vars.items() if data['obj'] is None}
 
         # Get execution order using topological sort
-        execution_order = self.topological_sort(deps_graph)
-        # print(loaded_vars)
+        # execution_order = self.topological_sort(deps_graph)
+        # print(execution_order)
 
+        # recreated_list = [var for var in loaded_vars.items() if data['obj'] is None]
         namespace = self.shell.user_ns
 
         # self.shell.user_ns['A'] = None
 
         # print(namespace['A'])
         # Execute code for each variable in order, only if missing
-        for var_name in execution_order:
+        for var_name in deps_graph:
             # Check if the variable exists and is not None in the namespace
             # print(namespace['A'])
             if var_name in namespace and namespace[var_name] is not None:
@@ -888,10 +939,10 @@ class CustomKernel(IPyflowKernel):
             
             # print(loaded_vars[var_name])
             code = str(loaded_vars[var_name]['code'])
-            # print(type(str(code)))
+            
             try:
                 # Execute the code in the namespace
-                # print("hello")
+                
                 exec(code, namespace)
                 # If the variable isn't directly assigned, try to find it
                 # if var_name not in namespace:
@@ -1159,7 +1210,7 @@ class CustomKernel(IPyflowKernel):
         # # #     patch_namespace(self.shell)
         
         # if self.audit:
-        if code.strip().startswith('%') or code.strip().startswith('%%'):
+        if ("audit" in code or "flow mode normal" in code) and (code.strip().startswith('%') or code.strip().startswith('%%')):
             # If the code is a magic command, execute it directly
             import_encodings = "import encodings.cp437\nimport encodings.iso8859_1\nimport encodings.utf_16\nimport codecs\ncodecs.lookup('cp437')\n"
             code = import_encodings + code
@@ -1176,7 +1227,7 @@ class CustomKernel(IPyflowKernel):
             res = await super().do_execute(code, silent, store_history, user_expressions, allow_stdin)
             if not c_id:
                 self.persist_metadata(notebook_path, code)
-                self.dump2(ip)
+                self.dump1(ip)
                 self.run_commit_command(f'{notebook_path}/vv', self.last_cid, f'{notebook_path}/checkpoint_{self.last_cid}.pkl')
                 self.post_run_cell(ip)
             return res

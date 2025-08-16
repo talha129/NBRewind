@@ -4,7 +4,6 @@
 
 > Developed as part of the research project:  
 > _"NBRewind: Accelerating Jupyter Notebook Re-execution using Checkpointing and Application Virtualization"_  
-> Submitted to CIKM 2025.
 
 ---
 
